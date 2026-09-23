@@ -1,6 +1,5 @@
 /*
  * Bandwidth Optimization Engine
- * Network Administrator - Etech Eritrea PLC (2013)
  * 
  * Real-time traffic classification and QoS management system
  */
