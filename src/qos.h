@@ -1,6 +1,7 @@
 #ifndef BWOPT_QOS_H
 #define BWOPT_QOS_H
 
+#include <stdint.h>
 #include <stdio.h>
 
 #include "config.h"
@@ -17,5 +18,15 @@ int bw_qos_script(const struct bw_config *cfg, const char *iface, FILE *out);
 
 /* Writes the command that removes the root qdisc (and the whole tree). */
 int bw_qos_clear_script(const char *iface, FILE *out);
+
+/*
+ * Writes the "tc class change" command that sets the guaranteed rate of
+ * class class_idx on iface (cfg->iface when NULL) to rate_bps. The command
+ * repeats ceil, burst and prio from the config, because tc class change
+ * resets any HTB parameter it is not given. Returns 0, or -1 for an index
+ * outside the config or a write error.
+ */
+int bw_qos_change_line(const struct bw_config *cfg, const char *iface, int class_idx,
+                       uint64_t rate_bps, FILE *out);
 
 #endif

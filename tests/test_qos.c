@@ -192,6 +192,48 @@ START_TEST(test_clear_script)
 }
 END_TEST
 
+START_TEST(test_change_line_keeps_burst_and_prio)
+{
+    struct bw_config cfg;
+    FILE *f = tmpfile();
+    char *got;
+    int rc;
+
+    ck_assert(f != NULL);
+    load(SHIPPED, &cfg);
+    rc = bw_qos_change_line(&cfg, NULL, 3, 5000000ULL, f);
+    ck_assert_int_eq(rc, 0);
+    got = slurp(f);
+    fclose(f);
+    ck_assert_str_eq(got, "tc class change dev eth0 parent 1:1 classid 1:40 htb rate 5000000bit"
+                          " ceil 100000000bit burst 256k prio 3\n");
+    free(got);
+}
+END_TEST
+
+START_TEST(test_change_line_interface_and_range)
+{
+    struct bw_config cfg;
+    FILE *f = tmpfile();
+    char *got;
+    int rc;
+
+    ck_assert(f != NULL);
+    load(SHIPPED, &cfg);
+    rc = bw_qos_change_line(&cfg, "bw0", 0, 35000000ULL, f);
+    ck_assert_int_eq(rc, 0);
+    rc = bw_qos_change_line(&cfg, "bw0", 4, 1000ULL, f);
+    ck_assert_int_eq(rc, -1);
+    rc = bw_qos_change_line(&cfg, "bw0", -1, 1000ULL, f);
+    ck_assert_int_eq(rc, -1);
+    got = slurp(f);
+    fclose(f);
+    ck_assert_str_eq(got, "tc class change dev bw0 parent 1:1 classid 1:10 htb rate 35000000bit"
+                          " ceil 100000000bit burst 32k prio 0\n");
+    free(got);
+}
+END_TEST
+
 Suite *qos_suite(void)
 {
     Suite *s = suite_create("qos");
@@ -204,6 +246,8 @@ Suite *qos_suite(void)
     tcase_add_test(tc, test_dscp34_tos_and_mask);
     tcase_add_test(tc, test_default_class_not_first);
     tcase_add_test(tc, test_clear_script);
+    tcase_add_test(tc, test_change_line_keeps_burst_and_prio);
+    tcase_add_test(tc, test_change_line_interface_and_range);
     suite_add_tcase(s, tc);
     return s;
 }

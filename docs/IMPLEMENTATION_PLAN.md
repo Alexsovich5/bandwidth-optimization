@@ -486,6 +486,7 @@ Common conventions:
     `bw_autotune`, prints or executes the change lines, and records the changes in `tuning`
   - `monitor --autotune` does the same after each flush once `window` samples exist.
     `--dry-run` only logs.
+    `enabled=1` in `[autotune]` turns this on without the flag.
   - current rates come from the db (the latest `tuning` row, or the configured rate)
 - **Files**: modify `src/main.c`, `src/qos.c`, `src/qos.h`, and `tests/test_qos.c`. Create
   `tests/integration/test_autotune.sh`.

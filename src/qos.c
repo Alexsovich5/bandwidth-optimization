@@ -45,3 +45,18 @@ int bw_qos_clear_script(const char *iface, FILE *out)
     fprintf(out, "tc qdisc del dev %s root\n", iface);
     return ferror(out) ? -1 : 0;
 }
+
+int bw_qos_change_line(const struct bw_config *cfg, const char *iface, int class_idx,
+                       uint64_t rate_bps, FILE *out)
+{
+    const char *dev = iface != NULL ? iface : cfg->iface;
+    const struct bw_class *c;
+
+    if (class_idx < 0 || class_idx >= cfg->nclasses)
+        return -1;
+    c = &cfg->classes[class_idx];
+    fprintf(out, "tc class change dev %s parent " BW_QOS_PARENT " classid 1:%u htb rate %"
+            PRIu64 "bit ceil %" PRIu64 "bit burst %s prio %u\n",
+            dev, c->classid_minor, rate_bps, cfg->total_bps, c->burst, c->prio);
+    return ferror(out) ? -1 : 0;
+}

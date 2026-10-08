@@ -15,6 +15,7 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include "autotune.h"
 #include "capture.h"
 #include "classifier.h"
 #include "config.h"
@@ -70,6 +71,9 @@ static void usage(FILE *out)
             "  monitor -i IFACE       the same on live traffic, until SIGINT/SIGTERM or\n"
             "                         --duration, logging each interval\n"
             "  report --db PATH       print per-class totals and average/peak bit/s\n"
+            "  autotune --db PATH     re-balance the HTB guaranteed rates from the last\n"
+            "                         window= samples and print the tc class change\n"
+            "                         commands (run them with --apply)\n"
             "\n"
             "Options:\n"
             "  -c, --config FILE      policy file (default config/policies.conf)\n"
@@ -77,13 +81,17 @@ static void usage(FILE *out)
             "  -r, --read FILE        pcap file to read\n"
             "  -w, --write FILE       pcap file to write\n"
             "  --summary              print packets and bytes per class instead\n"
-            "  --dry-run              print the commands apply/clear would run\n"
+            "  --dry-run              print the commands apply/clear would run; with\n"
+            "                         monitor --autotune, only print and log the changes\n"
             "  --db PATH              SQLite database (default: database= in the policy)\n"
             "  --interval S           seconds per sample (default: update_interval=)\n"
             "  --duration S           live monitor: stop after S seconds\n"
             "  --log PATH             live monitor log, appended to (default: log_file=)\n"
             "  --since UNIX_TS        report: only samples with ts >= UNIX_TS\n"
             "  --iface IFACE          report: only samples of this interface\n"
+            "  --autotune             monitor: auto-tune after every flush (also enabled\n"
+            "                         by enabled=1 in [autotune])\n"
+            "  --apply                autotune: run the commands and record the changes\n"
             "  --version              print the version and exit\n"
             "  --help                 print this help and exit\n");
 }
@@ -463,6 +471,157 @@ static int cmd_apply_clear(const char *config_file, const char *iface, int apply
     return rc;
 }
 
+enum autotune_mode {
+    AUTOTUNE_PRINT,   /* print the change lines */
+    AUTOTUNE_APPLY,   /* run them and record each change in the tuning table */
+    AUTOTUNE_DRY_RUN  /* print and log them as a dry run */
+};
+
+/* Appends one timestamped line to the monitor log and flushes it. */
+static void log_line(FILE *log, const char *fmt, ...);
+
+/*
+ * Reads the mean bps of the last window samples of every class on iface,
+ * returning 1 when every class has at least window samples, 0 when one has
+ * fewer, -1 on a database error.
+ */
+static int autotune_inputs(const struct bw_config *cfg, sqlite3 *db, const char *iface,
+                           uint64_t *avg, uint64_t *cur)
+{
+    struct bw_store_stat *rows = NULL;
+    int n, i, j, rc = 1;
+
+    n = bw_store_query(db, iface, 0, (int)cfg->tune.window, NULL, 0);
+    if (n < 0)
+        return -1;
+    if (n > 0 && (rows = calloc((size_t)n, sizeof *rows)) == NULL)
+        return -1;
+    if (n > 0 && (n = bw_store_query(db, iface, 0, (int)cfg->tune.window, rows, n)) < 0) {
+        free(rows);
+        return -1;
+    }
+    for (i = 0; i < cfg->nclasses && rc == 1; i++) {
+        const struct bw_class *c = &cfg->classes[i];
+
+        for (j = 0; j < n && strcmp(rows[j].cls, c->name) != 0; j++)
+            ;
+        if (j == n || rows[j].samples < cfg->tune.window) {
+            rc = 0;
+            break;
+        }
+        avg[i] = rows[j].avg_bps;
+        switch (bw_store_latest_rate(db, iface, c->name, &cur[i])) {
+        case 0:
+            cur[i] = c->rate_bps;
+            break;
+        case 1:
+            break;
+        default:
+            rc = -1;
+        }
+    }
+    free(rows);
+    return rc;
+}
+
+/*
+ * Runs one auto-tuning pass for iface. Current rates come from the latest
+ * tuning row of each class, or the configured rate. Every changed class
+ * gives one tc class change line, which is printed to out, applied and
+ * recorded with timestamp now, or printed and logged as a dry run.
+ * Returns the number of changed classes, or -1 on error (reported).
+ */
+static int autotune_pass(const struct bw_config *cfg, sqlite3 *db, const char *db_path,
+                         const char *iface, enum autotune_mode mode, time_t now,
+                         FILE *out, FILE *log)
+{
+    uint64_t avg[BW_MAX_CLASSES], cur[BW_MAX_CLASSES], target[BW_MAX_CLASSES];
+    char line[512];
+    int i, changed, rc;
+
+    rc = autotune_inputs(cfg, db, iface, avg, cur);
+    if (rc < 0) {
+        fprintf(stderr, "bwopt: %s: %s\n", db_path, sqlite3_errmsg(db));
+        log_line(log, "error: autotune: %s: %s", db_path, sqlite3_errmsg(db));
+        return -1;
+    }
+    if (rc == 0)
+        return 0;
+
+    changed = bw_autotune(cfg, avg, cur, target);
+    for (i = 0; i < cfg->nclasses; i++) {
+        const char *name = cfg->classes[i].name;
+        FILE *f;
+
+        if (target[i] == cur[i])
+            continue;
+        if ((f = tmpfile()) == NULL || bw_qos_change_line(cfg, iface, i, target[i], f) != 0
+            || fflush(f) != 0 || (rewind(f), fgets(line, sizeof line, f) == NULL)) {
+            if (f != NULL)
+                fclose(f);
+            fprintf(stderr, "bwopt: cannot build the tc class change command\n");
+            return -1;
+        }
+        fclose(f);
+        line[strcspn(line, "\n")] = '\0';
+
+        if (mode == AUTOTUNE_PRINT) {
+            fprintf(out, "%s\n", line);
+        } else if (mode == AUTOTUNE_DRY_RUN) {
+            fprintf(out, "autotune (dry run): %s\n", line);
+            log_line(log, "autotune (dry run): %s", line);
+        } else {
+            if (bw_exec_run(line, 0, NULL) != 0) {
+                log_line(log, "error: autotune: command failed: %s", line);
+                return -1;
+            }
+            if (bw_store_tuning(db, now, iface, name, cur[i], target[i]) != SQLITE_OK) {
+                fprintf(stderr, "bwopt: %s: %s\n", db_path, sqlite3_errmsg(db));
+                log_line(log, "error: autotune: %s: %s", db_path, sqlite3_errmsg(db));
+                return -1;
+            }
+            fprintf(out, "%s\n", line);
+            log_line(log, "autotune: %s %" PRIu64 " -> %" PRIu64 " bit/s",
+                     name, cur[i], target[i]);
+        }
+    }
+    return changed;
+}
+
+static int cmd_autotune(const char *config_file, const char *db_path, const char *iface,
+                        int apply)
+{
+    struct bw_config cfg;
+    sqlite3 *db = NULL;
+    int n, rc = 0;
+
+    if (db_path == NULL) {
+        fprintf(stderr, "bwopt: autotune needs --db PATH\n");
+        usage(stderr);
+        return EXIT_USAGE;
+    }
+    if (load_config(config_file, &cfg) != 0)
+        return EXIT_USAGE;
+    if (iface == NULL)
+        iface = cfg.iface;
+    /* an existing database only: a mistyped path holds no samples */
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        fprintf(stderr, "bwopt: %s: %s\n", db_path, db ? sqlite3_errmsg(db) : "out of memory");
+        sqlite3_close(db);
+        return EXIT_RUNTIME;
+    }
+    n = autotune_pass(&cfg, db, db_path, iface, apply ? AUTOTUNE_APPLY : AUTOTUNE_PRINT,
+                      time(NULL), stdout, NULL);
+    if (n < 0)
+        rc = EXIT_RUNTIME;
+    else if (fflush(stdout) != 0) {
+        fprintf(stderr, "bwopt: write error\n");
+        rc = EXIT_RUNTIME;
+    }
+    sqlite3_close(db);
+    return rc;
+}
+
 struct monitor_state {
     const struct bw_config *cfg;
     struct bw_capture *cap;
@@ -476,10 +635,10 @@ struct monitor_state {
     struct timeval last_ts;    /* timestamp of the latest packet */
     unsigned long packets, flushes;
     FILE *log;                 /* live runs only */
+    int autotune;              /* 0, or an autotune_mode + 1 */
     int failed;
 };
 
-/* Appends one timestamped line to the monitor log and flushes it. */
 static void log_line(FILE *log, const char *fmt, ...)
 {
     char stamp[32];
@@ -521,6 +680,13 @@ static void monitor_flush(struct monitor_state *st, time_t now)
     }
     log_line(st->log, "flush ts=%ld packets=%" PRIu64 " bytes=%" PRIu64,
              (long)now, packets, bytes);
+
+    if (st->autotune && autotune_pass(st->cfg, st->db, st->db_path, st->iface,
+                                      (enum autotune_mode)(st->autotune - 1), now,
+                                      stdout, st->log) < 0) {
+        st->failed = 1;
+        bw_capture_break(st->cap);
+    }
 }
 
 /* Classifies one frame and adds it to the current interval's counters. */
@@ -657,7 +823,7 @@ static int monitor_live(struct monitor_state *st, unsigned long duration)
 
 static int cmd_monitor(const char *config_file, const char *pcap_file, const char *live_iface,
                        const char *db_path, const char *log_path, unsigned interval,
-                       unsigned long duration)
+                       unsigned long duration, int autotune, int dry_run)
 {
     struct bw_config cfg;
     struct bw_capture cap;
@@ -717,6 +883,8 @@ static int cmd_monitor(const char *config_file, const char *pcap_file, const cha
     st.db_path = db_path;
     st.iface = live_iface != NULL ? live_iface : cfg.iface;
     st.interval = interval;
+    if (autotune || cfg.tune.enabled)
+        st.autotune = 1 + (dry_run ? AUTOTUNE_DRY_RUN : AUTOTUNE_APPLY);
 
     if (live_iface != NULL) {
         log_line(st.log, "monitor started on %s (interval %us, database %s)",
@@ -797,6 +965,8 @@ int main(int argc, char *argv[])
     unsigned long since = 0;
     int summary = 0;
     int dry_run = 0;
+    int autotune = 0;
+    int apply = 0;
     int i;
 
     for (i = 1; i < argc; i++) {
@@ -844,6 +1014,10 @@ int main(int argc, char *argv[])
             summary = 1;
         } else if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = 1;
+        } else if (strcmp(argv[i], "--autotune") == 0) {
+            autotune = 1;
+        } else if (strcmp(argv[i], "--apply") == 0) {
+            apply = 1;
         } else if (argv[i][0] != '-' && command == NULL) {
             command = argv[i];
         } else {
@@ -877,9 +1051,11 @@ int main(int argc, char *argv[])
         return cmd_apply_clear(config_file, interface, 0, dry_run);
     if (strcmp(command, "monitor") == 0)
         return cmd_monitor(config_file, read_file, interface, db_path, log_path,
-                           (unsigned)interval, duration);
+                           (unsigned)interval, duration, autotune, dry_run);
     if (strcmp(command, "report") == 0)
         return cmd_report(db_path, interface, (time_t)since);
+    if (strcmp(command, "autotune") == 0)
+        return cmd_autotune(config_file, db_path, interface, apply);
 
     fprintf(stderr, "bwopt: unknown command '%s'\n", command);
     usage(stderr);
