@@ -154,7 +154,7 @@ against it.
 
 ```
 [global]
-interface=<ifname>                 # default egress interface
+interface=<ifname>                 # default egress interface; 1-15 of [A-Za-z0-9_.-], no leading '-' 
 total_bandwidth=<bits/s>           # integer, e.g. 100000000
 default_class=<class name>
 
@@ -334,6 +334,13 @@ come from the existing `src/main.c`). `-c` defaults to `config/policies.conf`. `
 `--log` override `database` and `log_file` from `[monitoring]`. Exit codes: 0 means OK, 1 is a
 runtime error, and 2 is a usage or config error.
 
+Interface names end up in the `tc` and `iptables` command lines that `apply`, `clear` and
+`autotune --apply` run through `/bin/sh -c`, so every name, from `interface=` or from
+`-i`/`--interface`/`--iface`, must be 1-15 characters of `[A-Za-z0-9_.-]`, must not start with
+`-`, and must not be `.` or `..`. Anything else is a config error (`PATH:LINE: interface ...`)
+or a usage error (`bwopt: invalid interface name '...'`, exit 2) before any command runs. The
+script generators refuse such a name as well and write nothing.
+
 The shipped config's `/var/log/bandwidth_optimizer.log` and
 `/var/lib/bandwidth_optimizer/metrics.db` are kept as-is. `bwopt` does not create missing
 directories: if a path cannot be opened, `monitor` exits 1 with the error. Tests and the demo
@@ -344,19 +351,21 @@ always pass `--db` and `--log` under `/tmp`.
 ```
 <n> <proto> <src>:<sport> -> <dst>:<dport> len=<wire_len> dscp=<dscp> class=<name>
 <n> ethertype=0x<hhhh> len=<wire_len> class=unclassified          (non-IPv4)
+<n> undecoded caplen=<caplen> len=<wire_len> class=unclassified    (decode failed)
 ```
 
 `<proto>` is `tcp`, `udp` or `ip/<num>`. Ports are omitted (`<src> -> <dst>`) for non-first
-fragments and other protocols. Frames too short or malformed to decode are counted and printed
-like non-IPv4 frames. `classify --summary` prints a `class packets bytes` header, then one row
+fragments and other protocols. Frames too short or malformed to decode are counted as
+`unclassified` and printed from the pcap record lengths only (`undecoded`), never from a
+partly decoded header. `classify --summary` prints a `class packets bytes` header, then one row
 per class in config order, followed by an `unclassified` row (`tests/expected/mixed.summary`).
 `-r` has the long form `--read`.
 
 ## Stack & pinned versions
 
 C projects in 2013 did not use a language package registry. Dependencies come from the
-distribution, so they are pinned as exact Debian 7 (wheezy) package versions in the Dockerfile
-(`apt-get install pkg=version`). `check_period.py` has no C/apt ecosystem. It was run against a
+distribution, so they are pinned as exact Debian 7 (wheezy) package versions in
+`docker/apt/period.lock` (see "Apt sources" below for how they are fetched and verified). `check_period.py` has no C/apt ecosystem. It was run against a
 temp directory holding the apt pin list and exited 0, but that run checked nothing. The upstream
 release dates below were checked by hand against the projects' release archives.
 
@@ -386,19 +395,35 @@ cannot be installed over the 7.11 base image's newer libc6.
 | bash | 4.2 | from the base image (`4.2+dfsg-0.1+deb7u3`) | No: base-image revision | 2011-02-13 | Runs the integration scripts (`/dev/udp` senders) |
 | Linux HTB / SFQ / u32 / xt_DSCP | in-kernel | Docker host kernel | n/a | HTB since 2.4.20 (2002) | This is what "Linux Traffic Control" in the README refers to |
 
-Apt sources in the Dockerfile:
+Package retrieval (`Dockerfile`, `docker/apt/`):
 
-```
-deb http://archive.debian.org/debian wheezy main
-deb http://archive.debian.org/debian-security wheezy/updates main
-```
+The image is built in two stages. A current Debian stage (`debian:bookworm-slim`, pinned by
+digest) runs `docker/apt/fetch-debs.sh`, which downloads over HTTPS only (redirects included)
+from `snapshot.debian.org` and verifies the whole chain before anything is used:
 
-The security repository is required: the base image already carries `libc6 2.13-38+deb7u12`
-from it, and `libc6-dev` in wheezy main (`deb7u10`) requires an exact `libc6` match, so without
-the security repo `build-essential`, `libpcap0.8-dev`, `libsqlite3-dev` and `valgrind` (via
-`libc6-dbg`) cannot be installed. Every package above is pinned explicitly, so adding the
-security repo does not silently pull other newer versions of the pinned packages. tcpdump is not
-installed; `bwopt classify` covers what the tests need.
+1. `dists/<dist>/Release` and `Release.gpg`, checked with `gpgv` against
+   `debian-archive-keyring.gpg` and `debian-archive-removed-keys.gpg` (the wheezy keys have
+   expired, which does not stop their signatures from being checked), requiring a `VALIDSIG`
+   and no `BADSIG`/`ERRSIG`, and the expected `Codename`;
+2. `main/binary-amd64/Packages.gz` against its SHA256 in the verified `Release`;
+3. every `.deb` against its SHA256 in the verified `Packages`.
+
+The sources (`docker/apt/sources.conf`) are the final wheezy archive state
+(`archive/debian/20190301T000000Z` and `archive/debian-security/20190301T000000Z`, which
+match the base image's `libc6 2.13-38+deb7u12`) and, for the AddressSanitizer toolchain
+only, `archive/debian/20130930T000000Z` (jessie as of the period end). The wheezy stage then
+installs the verified `.deb` files of `docker/apt/period.lock` with `dpkg -i` and has no apt
+sources at all; there is no `--force-yes`, `AllowUnauthenticated`, `[trusted=yes]` or plain-HTTP
+source anywhere (`tests/integration/test_apt_sources.sh` fails if one comes back). The security
+packages are required: `libc6-dev` in wheezy main (`deb7u10`) requires an exact `libc6` match
+with the base image's `deb7u12`. tcpdump is not installed; `bwopt classify` covers what the
+tests need.
+
+AddressSanitizer: GCC 4.7 has no `-fsanitize=address`. The packages in
+`docker/apt/asan.lock` (GCC 4.8.1, binutils and glibc 2.17 from jessie as of 2013-09-30, plus the
+same wheezy libpcap, SQLite and Check) are unpacked, not installed, into the sysroot
+`/opt/asan`. `make asan` compiles there with `chroot` and runs the binaries from `/src`
+through the sysroot's dynamic loader. GCC 4.8.1 was released on 2013-05-31.
 
 ## Docker images
 
@@ -409,9 +434,8 @@ installed; `bwopt classify` covers what the tests need.
 | `debian:wheezy` | 200 | Yes | **Chosen** as the base of the single `bwopt` dev/runtime image |
 | `debian:7` | 200 | Yes | Same image as `debian:wheezy`. Kept as a fallback. |
 
-The Dockerfile replaces the apt sources with the two `archive.debian.org` lines above and sets
-`Acquire::Check-Valid-Until=false`. The wheezy archive keys have expired, so it also needs
-`--force-yes`/`AllowUnauthenticated`. In `docker-compose.yml`, the `bwopt` service builds this
+The Dockerfile installs only the verified packages described above (the base images are
+pinned by digest). In `docker-compose.yml`, the `bwopt` service builds this
 image, mounts the repo at `/src`, and adds `cap_add: [NET_ADMIN]` so the integration tests can
 create a `dummy` interface and install tc and iptables rules. The `demo` service uses the same
 image and also has `cap_add: [NET_ADMIN]`. `NET_RAW` is already in Docker's default
@@ -476,7 +500,8 @@ must state all of this.
 - **Fixture generator**: `tests/gen_pcap.c` writes deterministic pcaps (`mixed.pcap` with
   SIP/RTP/SSH/HTTPS/HTTP/FTP/unknown flows, an HTTP request on port 8080, ICMP, a non-first
   UDP fragment, ARP and IPv6; `vlan.pcap`, the same frames tagged with VLAN 100; `nonip.pcap`
-  with ARP, IPv6 and LLDP) into `tests/fixtures/out/`
+  with ARP, IPv6 and LLDP; `truncated.pcap`, SIP and SSH frames cut inside their headers)
+  into `tests/fixtures/out/`
   at test time, so no binary fixtures are committed.
 - **Integration tests** (`tests/integration/*.sh`, bash scripts run with `bash -e` because
   wheezy's `/bin/sh` is dash, which has no `/dev/udp`; `make integration`; need NET_ADMIN from
@@ -497,10 +522,14 @@ must state all of this.
     `autotune --apply`, and check that `tc class show` shows the changed rates with `prio` and
     `burst` unchanged, that the `tuning` table has rows, and that a second run changes nothing.
   - `test_install.sh`: staged `make install` layout.
-- **Memory**: `make memcheck` runs `run_tests` (CK_FORK=no) and `bwopt classify` under
-  valgrind with `--error-exitcode=1 --leak-check=full`. It is added right after the pcap
-  classify task, and from then on every task's acceptance runs it.
-- **Entry point**: `make test` = `unit` + `integration`. The canonical command is
+- **Memory**: `make memcheck` runs `run_tests` (CK_FORK=no) and `bwopt classify`, `mark`,
+  `monitor -r` and `report` on every fixture (including `truncated.pcap`) under valgrind with
+  `--error-exitcode=1 --leak-check=full`. `make asan` runs the same under AddressSanitizer
+  (GCC 4.8.1 in `/opt/asan`). The `packet_path` suite (`tests/test_packet_path.c`) feeds
+  every truncation of every fixture frame and 4000 fixed-seed pseudo-random frames through
+  decode, classify, print and DSCP rewrite, each in a heap buffer of exactly its captured
+  length, so both tools see any read past the capture.
+- **Entry point**: `make test` = `unit` + `integration` + `memcheck` + `asan`. The canonical command is
   `docker compose run --rm bwopt make test`.
 
 ## Known limitations that will remain
@@ -516,8 +545,8 @@ must state all of this.
   delay, so it cannot claim any efficiency gain.
 - Integration tests shape a dummy interface in a container, using the Docker host's kernel.
   They have not been validated against a real 2013 kernel or a real saturated WAN link.
-- The period image needs expired-key apt settings to build from `archive.debian.org`, and the
-  build may break if the archive moves.
+- The image build depends on `snapshot.debian.org` being reachable; a changed or unsigned
+  index fails the build rather than being installed.
 - Upstream versions are all from on or before 2013-09-30, but some Debian revisions are later
   rebuilds (libc6 `2.13-38+deb7u12`, sqlite3 `3.7.13-1+deb7u2`, git `1:1.7.10.4-1+wheezy3`),
   because the only pullable wheezy image and archive are the 7.11 point release. The true

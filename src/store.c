@@ -1,4 +1,6 @@
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "store.h"
@@ -131,8 +133,11 @@ static void copy_text(char *dst, size_t len, const unsigned char *src)
     snprintf(dst, len, "%s", src ? (const char *)src : "");
 }
 
-int bw_store_query(sqlite3 *db, const char *iface, time_t since, int last_n,
-                   struct bw_store_stat *out, int max)
+/*
+ * Prepares the aggregate query of bw_store_query; NULL on error. The
+ * caller steps it and reads each row with read_stat.
+ */
+static sqlite3_stmt *prepare_query(sqlite3 *db, const char *iface, time_t since, int last_n)
 {
     /* integer division keeps the mean exact and rounded down */
     static const char sql[] =
@@ -147,31 +152,78 @@ int bw_store_query(sqlite3 *db, const char *iface, time_t since, int last_n,
         " GROUP BY iface, class"
         " ORDER BY iface, class";
     sqlite3_stmt *st;
-    int rc, n = 0;
 
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
-        return -1;
+        return NULL;
     if (iface)
         sqlite3_bind_text(st, 1, iface, -1, SQLITE_STATIC);
     else
         sqlite3_bind_null(st, 1);
     sqlite3_bind_int64(st, 2, (sqlite3_int64)since);
     sqlite3_bind_int(st, 3, last_n);
+    return st;
+}
 
+static void read_stat(sqlite3_stmt *st, struct bw_store_stat *o)
+{
+    copy_text(o->iface, sizeof o->iface, sqlite3_column_text(st, 0));
+    copy_text(o->cls, sizeof o->cls, sqlite3_column_text(st, 1));
+    o->samples = (uint64_t)sqlite3_column_int64(st, 2);
+    o->packets = (uint64_t)sqlite3_column_int64(st, 3);
+    o->bytes = (uint64_t)sqlite3_column_int64(st, 4);
+    o->avg_bps = (uint64_t)sqlite3_column_int64(st, 5);
+    o->peak_bps = (uint64_t)sqlite3_column_int64(st, 6);
+}
+
+int bw_store_query(sqlite3 *db, const char *iface, time_t since, int last_n,
+                   struct bw_store_stat *out, int max)
+{
+    sqlite3_stmt *st = prepare_query(db, iface, since, last_n);
+    int rc, n = 0;
+
+    if (st == NULL)
+        return -1;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        if (n < max) {
-            struct bw_store_stat *o = &out[n];
-
-            copy_text(o->iface, sizeof o->iface, sqlite3_column_text(st, 0));
-            copy_text(o->cls, sizeof o->cls, sqlite3_column_text(st, 1));
-            o->samples = (uint64_t)sqlite3_column_int64(st, 2);
-            o->packets = (uint64_t)sqlite3_column_int64(st, 3);
-            o->bytes = (uint64_t)sqlite3_column_int64(st, 4);
-            o->avg_bps = (uint64_t)sqlite3_column_int64(st, 5);
-            o->peak_bps = (uint64_t)sqlite3_column_int64(st, 6);
-        }
+        if (n < max)
+            read_stat(st, &out[n]);
         n++;
     }
     sqlite3_finalize(st);
     return rc == SQLITE_DONE ? n : -1;
+}
+
+#define QUERY_ALL_FIRST 16
+
+int bw_store_query_all(sqlite3 *db, const char *iface, time_t since, int last_n,
+                       struct bw_store_stat **out)
+{
+    sqlite3_stmt *st = prepare_query(db, iface, since, last_n);
+    struct bw_store_stat *rows = NULL;
+    int rc, n = 0, cap = 0;
+
+    *out = NULL;
+    if (st == NULL)
+        return -1;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap == 0 ? QUERY_ALL_FIRST : cap * 2;
+            struct bw_store_stat *nr;
+
+            if (ncap <= cap || (size_t)ncap > SIZE_MAX / sizeof *rows
+                || (nr = realloc(rows, (size_t)ncap * sizeof *rows)) == NULL) {
+                rc = SQLITE_NOMEM;
+                break;
+            }
+            rows = nr;
+            cap = ncap;
+        }
+        read_stat(st, &rows[n++]);
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        free(rows);
+        return -1;
+    }
+    *out = rows;
+    return n;
 }

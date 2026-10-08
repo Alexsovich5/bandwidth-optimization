@@ -55,6 +55,16 @@ static int decode_link(int dlt, const u_char *buf, size_t caplen,
     }
 }
 
+/* Clears a partly decoded result so no field describes a frame that failed. */
+static int fail(struct bw_packet *out)
+{
+    size_t wire_len = out->wire_len;
+
+    memset(out, 0, sizeof(*out));
+    out->wire_len = wire_len;
+    return -1;
+}
+
 int bw_packet_decode(int dlt, const u_char *buf, size_t caplen, size_t wirelen,
                      struct bw_packet *out)
 {
@@ -66,23 +76,25 @@ int bw_packet_decode(int dlt, const u_char *buf, size_t caplen, size_t wirelen,
     memset(out, 0, sizeof(*out));
     out->wire_len = wirelen;
 
+    if (buf == NULL && caplen > 0)
+        return fail(out);
     if (decode_link(dlt, buf, caplen, &ethertype, &off) != 0)
-        return -1;
+        return fail(out);
     out->ethertype = ethertype;
     if (ethertype != ETHERTYPE_IPV4)
         return 0;
 
-    if (caplen - off < IPV4_MIN_HLEN)
-        return -1;
+    if (off > caplen || caplen - off < IPV4_MIN_HLEN)
+        return fail(out);
     ip = buf + off;
     if ((ip[0] >> 4) != 4)
-        return -1;
+        return fail(out);
     ihl = (size_t)(ip[0] & 0x0f) * 4;
     if (ihl < IPV4_MIN_HLEN || caplen - off < ihl)
-        return -1;
+        return fail(out);
     total = get16(ip + 2);
     if (total != 0 && total < ihl)
-        return -1;
+        return fail(out);
 
     /* The IPv4 length bounds the datagram (and drops Ethernet padding);
      * a zero length, as seen with segmentation offload, falls back to the
@@ -99,21 +111,23 @@ int bw_packet_decode(int dlt, const u_char *buf, size_t caplen, size_t wirelen,
     frag_off = get16(ip + 6) & 0x1fff;
 
     l4 = off + ihl;
+    if (l4 > end)
+        return fail(out);
     if (frag_off == 0) {
         if (out->ip_proto == IPPROTO_TCP_NUM) {
             size_t doff;
 
             if (end - l4 < TCP_MIN_HLEN)
-                return -1;
+                return fail(out);
             doff = (size_t)(buf[l4 + 12] >> 4) * 4;
             if (doff < TCP_MIN_HLEN || end - l4 < doff)
-                return -1;
+                return fail(out);
             out->sport = get16(buf + l4);
             out->dport = get16(buf + l4 + 2);
             l4 += doff;
         } else if (out->ip_proto == IPPROTO_UDP_NUM) {
             if (end - l4 < UDP_HLEN)
-                return -1;
+                return fail(out);
             out->sport = get16(buf + l4);
             out->dport = get16(buf + l4 + 2);
             l4 += UDP_HLEN;
@@ -123,4 +137,55 @@ int bw_packet_decode(int dlt, const u_char *buf, size_t caplen, size_t wirelen,
     out->payload = buf + l4;
     out->payload_len = end - l4;
     return 0;
+}
+
+int bw_packet_has_ports(const u_char *frame, size_t caplen, const struct bw_packet *pkt)
+{
+    const u_char *ip;
+
+    if (pkt->ethertype != ETHERTYPE_IPV4
+        || (pkt->ip_proto != IPPROTO_TCP_NUM && pkt->ip_proto != IPPROTO_UDP_NUM))
+        return 0;
+    if (frame == NULL || pkt->ip_off > caplen || caplen - pkt->ip_off < 8)
+        return 0;
+    ip = frame + pkt->ip_off;
+    return (get16(ip + 6) & 0x1fff) == 0;
+}
+
+static void format_addr(uint32_t a, char *buf, size_t len)
+{
+    snprintf(buf, len, "%u.%u.%u.%u", (unsigned)(a >> 24) & 0xff,
+             (unsigned)(a >> 16) & 0xff, (unsigned)(a >> 8) & 0xff, (unsigned)a & 0xff);
+}
+
+int bw_packet_print(FILE *out, unsigned long n, const u_char *frame, size_t caplen,
+                    size_t wirelen, const struct bw_packet *pkt, const char *class_name)
+{
+    char src[16], dst[16], proto[16];
+
+    if (pkt == NULL) {
+        fprintf(out, "%lu undecoded caplen=%lu len=%lu class=%s\n", n,
+                (unsigned long)caplen, (unsigned long)wirelen, class_name);
+    } else if (pkt->ethertype != ETHERTYPE_IPV4) {
+        fprintf(out, "%lu ethertype=0x%04x len=%lu class=%s\n", n, (unsigned)pkt->ethertype,
+                (unsigned long)pkt->wire_len, class_name);
+    } else {
+        format_addr(pkt->src, src, sizeof src);
+        format_addr(pkt->dst, dst, sizeof dst);
+        if (pkt->ip_proto == IPPROTO_TCP_NUM)
+            snprintf(proto, sizeof proto, "tcp");
+        else if (pkt->ip_proto == IPPROTO_UDP_NUM)
+            snprintf(proto, sizeof proto, "udp");
+        else
+            snprintf(proto, sizeof proto, "ip/%u", (unsigned)pkt->ip_proto);
+
+        if (bw_packet_has_ports(frame, caplen, pkt))
+            fprintf(out, "%lu %s %s:%u -> %s:%u len=%lu dscp=%u class=%s\n", n, proto,
+                    src, (unsigned)pkt->sport, dst, (unsigned)pkt->dport,
+                    (unsigned long)pkt->wire_len, (unsigned)pkt->dscp, class_name);
+        else
+            fprintf(out, "%lu %s %s -> %s len=%lu dscp=%u class=%s\n", n, proto, src, dst,
+                    (unsigned long)pkt->wire_len, (unsigned)pkt->dscp, class_name);
+    }
+    return ferror(out) ? -1 : 0;
 }

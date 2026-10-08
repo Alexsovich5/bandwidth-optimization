@@ -26,4 +26,23 @@ rc=0
 ./bwopt tc-script -c tests/fixtures/conf/bad_dscp.conf > /dev/null 2>&1 || rc=$?
 [ "$rc" -eq 2 ] || fail "tc-script on bad_dscp.conf exited $rc, expected 2"
 
+# Interface names reach /bin/sh through apply, clear and autotune --apply:
+# names with shell syntax are refused before any command runs, from the
+# command line and from the policy file alike.
+for bad in "bw0;touch $TMP/pwned" 'bw0$(touch '"$TMP"'/pwned)' "bw0 x" "-bw0"; do
+    for cmd in tc-script dscp-script "apply --dry-run" apply clear monitor; do
+        rc=0
+        # shellcheck disable=SC2086
+        out=$(./bwopt $cmd -i "$bad" 2>&1) || rc=$?
+        [ "$rc" -eq 2 ] || fail "$cmd -i '$bad' exited $rc, expected 2"
+        echo "$out" | grep -q 'invalid interface name' || fail "$cmd -i '$bad': $out"
+    done
+done
+sed "s|^interface=.*|interface=bw0;touch $TMP/pwned|" config/policies.conf > "$TMP/inject.conf"
+grep -q '^interface=bw0;touch ' "$TMP/inject.conf" || fail "inject.conf not written"
+rc=0
+./bwopt apply -c "$TMP/inject.conf" > /dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "apply with interface=bw0;touch exited $rc, expected 2"
+[ ! -e "$TMP/pwned" ] || fail "a command in the interface name was run"
+
 echo "test_tc_script: ok"

@@ -67,6 +67,20 @@ printf '%s\n' "$nonip_out" | grep -q 'ethertype=0x88cc' || fail "LLDP frame miss
 ./bwopt classify -r "$OUT/nonip.pcap" --summary | grep -q '^unclassified  *3  *' \
     || fail "nonip summary has no unclassified=3 row"
 
+# Frames cut short by the snap length: the ones that do not decode are
+# printed from the capture lengths only and counted as unclassified.
+[ -s "$OUT/truncated.pcap" ] || fail "$OUT/truncated.pcap missing; run make fixtures"
+trunc=$(./bwopt classify -r "$OUT/truncated.pcap") || fail "classify truncated.pcap failed"
+want='1 undecoded caplen=10 len=76 class=unclassified
+2 undecoded caplen=20 len=76 class=unclassified
+3 undecoded caplen=40 len=76 class=unclassified
+4 udp 192.168.1.10:40000 -> 10.0.0.20:5060 len=76 dscp=46 class=high_priority
+5 undecoded caplen=50 len=75 class=unclassified'
+[ "$trunc" = "$want" ] || fail "truncated.pcap output:
+$trunc"
+./bwopt classify -r "$OUT/truncated.pcap" --summary | grep -q '^unclassified  *4  *' \
+    || fail "truncated.pcap summary has no unclassified=4 row"
+
 # A missing file exits 1 with the pcap error message.
 rc=0
 err=$(./bwopt classify -r /nonexistent.pcap 2>&1 >/dev/null) || rc=$?

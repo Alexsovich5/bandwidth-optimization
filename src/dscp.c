@@ -19,6 +19,9 @@ int bw_dscp_script(const struct bw_config *cfg, const char *iface, FILE *out)
     static const char *const dirs[] = { "dport", "sport" };
     int i, p, d;
 
+    if (!bw_iface_valid(egress(cfg, iface)))
+        return -1;
+
     fprintf(out, "iptables -t mangle -N " BW_DSCP_CHAIN "\n");
     fprintf(out, "iptables -t mangle -A POSTROUTING -o %s -j " BW_DSCP_CHAIN "\n",
             egress(cfg, iface));
@@ -41,6 +44,8 @@ int bw_dscp_script(const struct bw_config *cfg, const char *iface, FILE *out)
 
 int bw_dscp_clear_script(const struct bw_config *cfg, const char *iface, FILE *out)
 {
+    if (!bw_iface_valid(egress(cfg, iface)))
+        return -1;
     fprintf(out, "iptables -t mangle -F " BW_DSCP_CHAIN "\n");
     fprintf(out, "iptables -t mangle -D POSTROUTING -o %s -j " BW_DSCP_CHAIN "\n",
             egress(cfg, iface));
@@ -79,4 +84,11 @@ int bw_dscp_rewrite(u_char *ip_hdr, size_t len, uint8_t dscp)
     ip_hdr[10] = (u_char)(sum >> 8);
     ip_hdr[11] = (u_char)(sum & 0xff);
     return 0;
+}
+
+int bw_dscp_mark_frame(u_char *frame, size_t caplen, const struct bw_packet *pkt, uint8_t dscp)
+{
+    if (frame == NULL || pkt->ethertype != 0x0800 || pkt->ip_off > caplen)
+        return -1;
+    return bw_dscp_rewrite(frame + pkt->ip_off, caplen - pkt->ip_off, dscp);
 }

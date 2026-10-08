@@ -234,6 +234,31 @@ START_TEST(test_change_line_interface_and_range)
 }
 END_TEST
 
+/* Names that would let the generated line run another command in /bin/sh. */
+START_TEST(test_unsafe_interface_writes_nothing)
+{
+    static const char *bad[] = { "eth0;reboot", "$(id)", "a b", "eth0\nreboot", "-x", "" };
+    struct bw_config cfg;
+    size_t i;
+
+    load(SHIPPED, &cfg);
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        FILE *f = tmpfile();
+        int rc;
+
+        ck_assert(f != NULL);
+        rc = bw_qos_script(&cfg, bad[i], f);
+        ck_assert_msg(rc == -1, "script accepted '%s'", bad[i]);
+        rc = bw_qos_clear_script(bad[i], f);
+        ck_assert_msg(rc == -1, "clear script accepted '%s'", bad[i]);
+        rc = bw_qos_change_line(&cfg, bad[i], 0, 1000000, f);
+        ck_assert_msg(rc == -1, "change line accepted '%s'", bad[i]);
+        ck_assert_msg(ftell(f) == 0, "'%s': output written", bad[i]);
+        fclose(f);
+    }
+}
+END_TEST
+
 Suite *qos_suite(void)
 {
     Suite *s = suite_create("qos");
@@ -248,6 +273,7 @@ Suite *qos_suite(void)
     tcase_add_test(tc, test_clear_script);
     tcase_add_test(tc, test_change_line_keeps_burst_and_prio);
     tcase_add_test(tc, test_change_line_interface_and_range);
+    tcase_add_test(tc, test_unsafe_interface_writes_nothing);
     suite_add_tcase(s, tc);
     return s;
 }

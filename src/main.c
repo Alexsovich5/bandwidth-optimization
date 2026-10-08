@@ -31,9 +31,6 @@
 #define EXIT_RUNTIME 1
 #define EXIT_USAGE   2
 
-#define PROTO_TCP      6
-#define PROTO_UDP      17
-
 #define LIVE_SNAPLEN    256
 #define LIVE_TIMEOUT_MS 100
 
@@ -167,73 +164,29 @@ struct classify_state {
     uint64_t bytes[BW_MAX_CLASSES + 1];
 };
 
-static void format_addr(uint32_t a, char *buf, size_t len)
-{
-    snprintf(buf, len, "%u.%u.%u.%u", (unsigned)(a >> 24) & 0xff,
-             (unsigned)(a >> 16) & 0xff, (unsigned)(a >> 8) & 0xff, (unsigned)a & 0xff);
-}
-
-/* True for a TCP/UDP packet whose ports were decoded (first fragment). */
-static int has_ports(const u_char *frame, const struct bw_packet *pkt)
-{
-    const u_char *ip = frame + pkt->ip_off;
-
-    if (pkt->ip_proto != PROTO_TCP && pkt->ip_proto != PROTO_UDP)
-        return 0;
-    return (((ip[6] << 8) | ip[7]) & 0x1fff) == 0;
-}
-
-/*
- * Prints one classify line. Frames that were not classified (non-IPv4, or
- * too short or malformed to decode) are shown by ethertype only.
- */
-static void print_packet(unsigned long n, const u_char *frame, const struct bw_packet *pkt,
-                         const char *class_name, int classified)
-{
-    char src[16], dst[16], proto[16];
-
-    if (!classified) {
-        printf("%lu ethertype=0x%04x len=%lu class=%s\n", n, (unsigned)pkt->ethertype,
-               (unsigned long)pkt->wire_len, class_name);
-        return;
-    }
-    format_addr(pkt->src, src, sizeof src);
-    format_addr(pkt->dst, dst, sizeof dst);
-    if (pkt->ip_proto == PROTO_TCP)
-        snprintf(proto, sizeof proto, "tcp");
-    else if (pkt->ip_proto == PROTO_UDP)
-        snprintf(proto, sizeof proto, "udp");
-    else
-        snprintf(proto, sizeof proto, "ip/%u", (unsigned)pkt->ip_proto);
-
-    if (has_ports(frame, pkt))
-        printf("%lu %s %s:%u -> %s:%u len=%lu dscp=%u class=%s\n", n, proto,
-               src, (unsigned)pkt->sport, dst, (unsigned)pkt->dport,
-               (unsigned long)pkt->wire_len, (unsigned)pkt->dscp, class_name);
-    else
-        printf("%lu %s %s -> %s len=%lu dscp=%u class=%s\n", n, proto, src, dst,
-               (unsigned long)pkt->wire_len, (unsigned)pkt->dscp, class_name);
-}
-
 static void classify_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
                            const u_char *bytes)
 {
     struct classify_state *st = (struct classify_state *)user;
     struct bw_packet pkt;
-    int idx = -1, slot;
+    int idx = -1, slot, decoded;
 
+    memset(&pkt, 0, sizeof pkt);
     st->index++;
     /* A frame that fails to decode is counted as unclassified. */
-    if (bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) == 0)
+    decoded = bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) == 0;
+    if (decoded)
         idx = bw_classify(st->cfg, &pkt);
 
     slot = idx >= 0 ? idx : BW_MAX_CLASSES;
     st->packets[slot]++;
     st->bytes[slot] += hdr->len;
 
+    /* An undecoded frame is printed from the pcap header lengths only. */
     if (!st->summary)
-        print_packet(st->index, bytes, &pkt,
-                     idx >= 0 ? st->cfg->classes[idx].name : "unclassified", idx >= 0);
+        bw_packet_print(stdout, st->index, bytes, hdr->caplen, hdr->len,
+                        decoded ? &pkt : NULL,
+                        idx >= 0 ? st->cfg->classes[idx].name : "unclassified");
 }
 
 static int cmd_classify(const char *config_file, const char *pcap_file, int summary)
@@ -293,6 +246,7 @@ static void mark_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
     struct bw_packet pkt;
     int idx;
 
+    memset(&pkt, 0, sizeof pkt);
     st->packets++;
     if (bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) != 0
         || (idx = bw_classify(st->cfg, &pkt)) < 0) {
@@ -312,8 +266,8 @@ static void mark_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
         st->buflen = hdr->caplen;
     }
     memcpy(st->buf, bytes, hdr->caplen);
-    if (bw_dscp_rewrite(st->buf + pkt.ip_off, hdr->caplen - pkt.ip_off,
-                        (uint8_t)st->cfg->classes[idx].dscp) == 0)
+    if (bw_dscp_mark_frame(st->buf, hdr->caplen, &pkt,
+                           (uint8_t)st->cfg->classes[idx].dscp) == 0)
         st->marked++;
     pcap_dump((u_char *)st->dumper, hdr, st->buf);
 }
@@ -491,15 +445,9 @@ static int autotune_inputs(const struct bw_config *cfg, sqlite3 *db, const char 
     struct bw_store_stat *rows = NULL;
     int n, i, j, rc = 1;
 
-    n = bw_store_query(db, iface, 0, (int)cfg->tune.window, NULL, 0);
+    n = bw_store_query_all(db, iface, 0, (int)cfg->tune.window, &rows);
     if (n < 0)
         return -1;
-    if (n > 0 && (rows = calloc((size_t)n, sizeof *rows)) == NULL)
-        return -1;
-    if (n > 0 && (n = bw_store_query(db, iface, 0, (int)cfg->tune.window, rows, n)) < 0) {
-        free(rows);
-        return -1;
-    }
     for (i = 0; i < cfg->nclasses && rc == 1; i++) {
         const struct bw_class *c = &cfg->classes[i];
 
@@ -696,6 +644,7 @@ static void monitor_count(struct monitor_state *st, int dlt, const struct pcap_p
     struct bw_packet pkt;
     int idx = -1;
 
+    memset(&pkt, 0, sizeof pkt);
     if (bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) == 0)
         idx = bw_classify(st->cfg, &pkt);
     bw_monitor_add(&st->mon, idx, hdr->len);
@@ -931,14 +880,7 @@ static int cmd_report(const char *db_path, const char *iface, time_t since)
         sqlite3_close(db);
         return EXIT_RUNTIME;
     }
-    n = bw_store_query(db, iface, since, 0, NULL, 0);
-    if (n > 0 && (rows = calloc((size_t)n, sizeof *rows)) == NULL) {
-        fprintf(stderr, "bwopt: out of memory\n");
-        sqlite3_close(db);
-        return EXIT_RUNTIME;
-    }
-    if (n > 0)
-        n = bw_store_query(db, iface, since, 0, rows, n);
+    n = bw_store_query_all(db, iface, since, 0, &rows);
     if (n < 0) {
         fprintf(stderr, "bwopt: %s: %s\n", db_path, sqlite3_errmsg(db));
         rc = EXIT_RUNTIME;
@@ -1025,6 +967,12 @@ int main(int argc, char *argv[])
             usage(stderr);
             return EXIT_USAGE;
         }
+    }
+
+    /* -i/--iface ends up in tc and iptables command lines run by /bin/sh */
+    if (interface != NULL && !bw_iface_valid(interface)) {
+        fprintf(stderr, "bwopt: invalid interface name '%s'\n", interface);
+        return EXIT_USAGE;
     }
 
     signal(SIGINT, signal_handler);

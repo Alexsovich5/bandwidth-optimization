@@ -354,6 +354,47 @@ START_TEST(test_class_limit)
 }
 END_TEST
 
+/* The interface name ends up in tc/iptables command lines run by /bin/sh. */
+START_TEST(test_interface_name_validated)
+{
+    struct bw_config cfg;
+    char err[256];
+    const char *good[] = { "eth0", "bw0", "br-lan.10", "wlan0_x", "abcdefghijklmno" };
+    const char *bad[] = {
+        "eth0;touch /tmp/bwopt_pwned", "eth0|id", "$(id)", "a`id`", "eth 0", "a&b",
+        "x>y", "'eth0'", "../x", "a/b", ".", "..", "abcdefghijklmnop", "eth0\\n",
+        "-eth0", "--help"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof good / sizeof good[0]; i++) {
+        char text[512];
+
+        ck_assert_msg(bw_iface_valid(good[i]), "rejected valid name %s", good[i]);
+        snprintf(text, sizeof text,
+                 "[global]\ninterface=%s\ntotal_bandwidth=1000\ndefault_class=b\n"
+                 "[classes]\nb.bandwidth=50%%\nb.dscp=0\nb.burst=1k\n", good[i]);
+        err[0] = '\0';
+        ck_assert_msg(load_text(text, &cfg, err, sizeof err) == 0, "%s: %s", good[i], err);
+        ck_assert_str_eq(cfg.iface, good[i]);
+    }
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char text[512];
+
+        ck_assert_msg(!bw_iface_valid(bad[i]), "accepted invalid name %s", bad[i]);
+        snprintf(text, sizeof text,
+                 "[global]\ninterface=%s\ntotal_bandwidth=1000\ndefault_class=b\n"
+                 "[classes]\nb.bandwidth=50%%\nb.dscp=0\nb.burst=1k\n", bad[i]);
+        err[0] = '\0';
+        ck_assert_msg(load_text(text, &cfg, err, sizeof err) == -1, "loaded interface %s", bad[i]);
+        ck_assert_msg(strstr(err, ":2:") != NULL && strstr(err, "interface") != NULL,
+                      "%s: unexpected error '%s'", bad[i], err);
+    }
+    ck_assert(!bw_iface_valid(""));
+    ck_assert(!bw_iface_valid(NULL));
+}
+END_TEST
+
 Suite *config_suite(void)
 {
     Suite *s = suite_create("config");
@@ -373,6 +414,7 @@ Suite *config_suite(void)
                         (int)(sizeof error_cases / sizeof error_cases[0]));
     tcase_add_test(tc, test_more_invalid_values);
     tcase_add_test(tc, test_class_limit);
+    tcase_add_test(tc, test_interface_name_validated);
     suite_add_tcase(s, tc);
     return s;
 }

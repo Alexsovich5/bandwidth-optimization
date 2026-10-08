@@ -6,6 +6,9 @@
  *               fragment, ARP and IPv6 (Ethernet II)
  *   vlan.pcap   the same frames behind an 802.1Q tag (VLAN 100)
  *   nonip.pcap  ARP, IPv6 and LLDP frames only
+ *   truncated.pcap  the first SIP and SSH frames of mixed.pcap captured
+ *               with short snap lengths (inside the Ethernet, IPv4 and
+ *               transport headers, and just past the UDP header)
  *
  * usage: gen_pcap OUTDIR
  */
@@ -286,6 +289,21 @@ static void writer_put(struct writer *w, const struct frame *f)
     w->n++;
 }
 
+/* Writes only the first caplen bytes of f, keeping its full wire length. */
+static void writer_put_trunc(struct writer *w, const struct frame *f, size_t caplen)
+{
+    struct pcap_pkthdr h;
+    long usec = w->n * STEP_USEC;
+
+    memset(&h, 0, sizeof h);
+    h.ts.tv_sec = BASE_SEC + usec / 1000000L;
+    h.ts.tv_usec = usec % 1000000L;
+    h.caplen = (bpf_u_int32)(caplen < f->len ? caplen : f->len);
+    h.len = (bpf_u_int32)f->len;
+    pcap_dump((u_char *)w->dumper, &h, f->buf);
+    w->n++;
+}
+
 static void writer_close(struct writer *w)
 {
     pcap_dump_close(w->dumper);
@@ -326,6 +344,22 @@ static void write_nonip(const char *dir)
     writer_close(&w);
 }
 
+static void write_truncated(const char *dir)
+{
+    static const size_t sip_caps[] = { 10, 20, 40, 42 };
+    struct writer w;
+    struct frame sip, ssh;
+    size_t i;
+
+    build_ip(&sip, &mixed[0], 0, 0x1000);
+    build_ip(&ssh, &mixed[5], 0, 0x1005);
+    writer_open(&w, dir, "truncated.pcap");
+    for (i = 0; i < sizeof sip_caps / sizeof sip_caps[0]; i++)
+        writer_put_trunc(&w, &sip, sip_caps[i]);
+    writer_put_trunc(&w, &ssh, 50);
+    writer_close(&w);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc != 2) {
@@ -335,5 +369,6 @@ int main(int argc, char *argv[])
     write_mixed(argv[1], "mixed.pcap", 0);
     write_mixed(argv[1], "vlan.pcap", 1);
     write_nonip(argv[1]);
+    write_truncated(argv[1]);
     return 0;
 }

@@ -250,6 +250,28 @@ START_TEST(test_rewrite_rejects_bad_input)
 }
 END_TEST
 
+START_TEST(test_unsafe_interface_writes_nothing)
+{
+    static const char *bad[] = { "eth0;reboot", "$(id)", "a b", "eth0\nreboot", "-x", "" };
+    struct bw_config cfg;
+    size_t i;
+
+    load(SHIPPED, &cfg);
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        FILE *f = tmpfile();
+        int rc;
+
+        ck_assert(f != NULL);
+        rc = bw_dscp_script(&cfg, bad[i], f);
+        ck_assert_msg(rc == -1, "script accepted '%s'", bad[i]);
+        rc = bw_dscp_clear_script(&cfg, bad[i], f);
+        ck_assert_msg(rc == -1, "clear script accepted '%s'", bad[i]);
+        ck_assert_msg(ftell(f) == 0, "'%s': output written", bad[i]);
+        fclose(f);
+    }
+}
+END_TEST
+
 Suite *dscp_suite(void)
 {
     Suite *s = suite_create("dscp");
@@ -264,6 +286,7 @@ Suite *dscp_suite(void)
     tcase_add_test(tc, test_rewrite_keeps_ecn);
     tcase_add_test(tc, test_rewrite_covers_options);
     tcase_add_test(tc, test_rewrite_rejects_bad_input);
+    tcase_add_test(tc, test_unsafe_interface_writes_nothing);
     suite_add_tcase(s, tc);
     return s;
 }

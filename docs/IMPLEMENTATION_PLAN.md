@@ -44,6 +44,9 @@ Common conventions:
       git-man=1:1.7.10.4-1+wheezy3`
     - the same `RUN` then runs `gcc --version && valgrind --version && iptables -V && git
       --version` as a build-time smoke check
+    - (superseded in T18: packages are now fetched over HTTPS from `snapshot.debian.org` and
+      verified with `gpgv` and SHA256 in a builder stage, then installed with `dpkg`; the
+      `archive.debian.org` sources and `AllowUnauthenticated`/`--force-yes` are gone)
     - `WORKDIR /src`
   - create `docker-compose.yml`: top-level `name: bandwidth-optimization`; service `bwopt`
     builds `.` as image `bandwidth-optimization:dev`, mounts the repo at `/src`, sets
@@ -576,3 +579,69 @@ Common conventions:
   Documents the pinned wheezy stack, the simulated egress link and
   synthetic traffic, and a layout tree generated from git ls-files.
   ```
+
+## T18 — Security and hygiene hardening
+
+- **Goal**: Review the whole repository for injection, memory safety on untrusted capture
+  input, unauthenticated package retrieval and hygiene, and fix what was found.
+- **Found and changed**:
+  - Shell command injection through interface names: `interface=` and `-i`/`--interface`/
+    `--iface` were copied unchecked into the `tc`/`iptables` lines that `apply`, `clear` and
+    `autotune --apply` run with `/bin/sh -c` (`-i 'bw0;cmd'` ran `cmd` as root).
+    `bw_iface_valid()` (1-15 of `[A-Za-z0-9_.-]`, no leading `-`, not `.`/`..`) is enforced by
+    the config parser (line-numbered error), by `main` for every command (exit 2) and by the
+    script generators, which refuse the name and write nothing.
+  - Packet path memory safety (required fix 13): `struct bw_packet` is zeroed before every
+    decode and `bw_packet_decode` clears its output on every failure; classify prints an
+    undecoded frame from the pcap record lengths only (`<n> undecoded caplen=.. len=..`) instead
+    of from the packet struct; the port check (`bw_packet_has_ports`) and the DSCP rewrite
+    (`bw_dscp_mark_frame`) take the captured length and check every offset against it; the
+    `caplen - off` subtractions in the decoder are guarded. The out-of-bounds read in
+    `src/main.c` was in `report` and `autotune`: they counted rows with `bw_store_query`, then
+    queried again into a buffer of that size, and used the second count, which a monitor
+    writing in between could make larger than the buffer. `bw_store_query_all()` now reads
+    every row in one pass into a buffer it grows itself.
+  - Signed package retrieval (required fix 1): the image no longer uses plain-HTTP
+    `archive.debian.org` sources with `AllowUnauthenticated` and `--force-yes`. A digest-pinned
+    `debian:bookworm-slim` stage runs `docker/apt/fetch-debs.sh` (HTTPS only, Release checked
+    with `gpgv` against the current and removed archive keyrings, then Packages and every
+    `.deb` by SHA256); the wheezy stage installs `docker/apt/period.lock` with `dpkg -i` and has
+    no apt sources.
+  - AddressSanitizer: GCC 4.7 has none, so `docker/apt/asan.lock` (GCC 4.8.1, glibc 2.17 and
+    binutils from the jessie snapshot of 2013-09-30, plus the wheezy libpcap/SQLite/Check) is
+    unpacked into the `/opt/asan` sysroot; `make asan` compiles there with `chroot` and runs
+    from `/src` through the sysroot loader.
+  - Secrets audit (required fix 10): the tool handles no credentials, tokens or connection
+    URLs; nothing to mask.
+  - Hygiene: date-like PRNG seeds in `tests/test_autotune.c` and `tests/test_packet_path.c`
+    replaced with neutral constants.
+- **Files**: `Dockerfile`, `docker/apt/{fetch-debs.sh,sources.conf,period.lock,asan.lock}`,
+  `Makefile` (`asan` target; `memcheck` also runs `mark`, `monitor -r` and `report` on every
+  fixture; `test` = `unit integration memcheck asan`), `src/config.[ch]`, `src/packet.[ch]`,
+  `src/dscp.[ch]`, `src/qos.[ch]`, `src/store.[ch]`, `src/main.c`, `tests/gen_pcap.c`
+  (`truncated.pcap`), `tests/test_packet_path.c` (new suite, registered in
+  `tests/run_tests.c`), `tests/test_config.c`, `tests/test_store.c`, `tests/test_qos.c`,
+  `tests/test_dscp.c`, `tests/integration/test_classify.sh`,
+  `tests/integration/test_tc_script.sh`, `tests/integration/test_apt_sources.sh` (new),
+  `docs/SPEC.md`, `README.md`.
+- **Tests first**:
+  - `test_config.c`: shell metacharacters, spaces, quotes, `/`, `.`/`..`, a leading `-` and
+    16-character names are rejected with a line-numbered `interface` error; valid names load
+  - `test_qos.c`, `test_dscp.c`: an unsafe interface makes every generator return -1 and
+    write nothing
+  - `test_tc_script.sh`: `tc-script`, `dscp-script`, `apply [--dry-run]`, `clear` and
+    `monitor` with `-i 'bw0;touch …'` and similar exit 2, and `apply` with such an
+    `interface=` in the policy runs nothing
+  - `test_packet_path.c`: every truncation of every fixture frame and 4000 fixed-seed random
+    frames through decode, classify, print and DSCP rewrite in exact-size heap buffers;
+    failed decodes leave no stale fields; `undecoded` print format; caplen checks in
+    `bw_packet_has_ports` and `bw_dscp_mark_frame`
+  - `test_store.c`: `bw_store_query_all` returns all 25 rows of 5 interfaces x 5 classes
+  - `test_classify.sh`: `truncated.pcap` prints `undecoded caplen=… len=…` lines
+  - `test_apt_sources.sh`: no Dockerfile or apt file contains `--allow-unauthenticated`,
+    `--force-yes`, `[trusted=yes]`, `AllowUnauthenticated`, `--no-check-gpg` or `http://`
+    (the scanner is checked against a sample with each form first); every source is HTTPS;
+    `fetch-debs.sh` keeps its HTTPS-only, `gpgv` and SHA256 checks; the wheezy stage uses
+    `dpkg -i`, not `apt-get`; the built image has no apt sources
+- **Acceptance**: `docker compose build bwopt && docker compose run --rm bwopt make test`
+  (now including `memcheck` and `asan`), then `docker compose down`.

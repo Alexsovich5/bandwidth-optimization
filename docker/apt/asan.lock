@@ -1,0 +1,31 @@
+# Files unpacked (not installed) into the /opt/asan sysroot: gcc 4.8 with
+# AddressSanitizer and the glibc it needs, plus the same libpcap, SQLite and
+# Check versions as the main image.
+# Columns: source (see sources.conf), package, exact version.
+jessie-main      gcc-4.8              4.8.1-10
+jessie-main      cpp-4.8              4.8.1-10
+jessie-main      gcc-4.8-base         4.8.1-10
+jessie-main      libgcc-4.8-dev       4.8.1-10
+jessie-main      libasan0             4.8.1-10
+jessie-main      libgcc1              1:4.8.1-10
+jessie-main      libstdc++6           4.8.1-10
+jessie-main      libgomp1             4.8.1-10
+jessie-main      libitm1              4.8.1-10
+jessie-main      libatomic1           4.8.1-10
+jessie-main      libquadmath0         4.8.1-10
+jessie-main      libtsan0             4.8.1-10
+jessie-main      binutils             2.23.52.20130828-1
+jessie-main      libc6                2.17-92+b1
+jessie-main      libc6-dev            2.17-92+b1
+jessie-main      linux-libc-dev       3.10.11-1
+jessie-main      libcloog-isl4        0.18.0-2
+jessie-main      libisl10             0.11.2-1
+jessie-main      libgmp10             2:5.1.2+dfsg-3
+jessie-main      libmpc3              1.0.1-1
+jessie-main      libmpfr4             3.1.1-2
+jessie-main      zlib1g               1:1.2.8.dfsg-1
+wheezy-main      libpcap0.8           1.3.0-1
+wheezy-main      libpcap0.8-dev       1.3.0-1
+wheezy-main      libsqlite3-0         3.7.13-1+deb7u2
+wheezy-main      libsqlite3-dev       3.7.13-1+deb7u2
+wheezy-main      check                0.9.8-2

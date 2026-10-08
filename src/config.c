@@ -115,6 +115,22 @@ static int valid_name(const char *s)
     return 1;
 }
 
+int bw_iface_valid(const char *s)
+{
+    size_t n;
+
+    if (s == NULL)
+        return 0;
+    n = strlen(s);
+    if (n == 0 || n >= BW_IFACE_MAX || s[0] == '-' || strcmp(s, ".") == 0
+        || strcmp(s, "..") == 0)
+        return 0;
+    for (; *s; s++)
+        if (!isalnum((unsigned char)*s) && *s != '_' && *s != '-' && *s != '.')
+            return 0;
+    return 1;
+}
+
 /* N, Nk or Nm with N > 0. */
 static int valid_burst(const char *s)
 {
@@ -205,7 +221,11 @@ static int global_key(struct parser *p, const char *key, const char *val)
     if (strcmp(key, "interface") == 0) {
         if (set_once(p, &p->iface_line, key) != 0)
             return -1;
-        return copy_value(p, cfg->iface, sizeof cfg->iface, key, val);
+        if (!bw_iface_valid(val))
+            return fail(p, p->line, "interface '%s' must be 1-%d letters, digits, '_', '-' "
+                        "or '.' and not start with '-'", val, BW_IFACE_MAX - 1);
+        strcpy(cfg->iface, val);
+        return 0;
     }
     if (strcmp(key, "total_bandwidth") == 0) {
         if (set_once(p, &p->total_line, key) != 0)

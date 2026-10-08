@@ -14,6 +14,7 @@ Suite *monitor_suite(void);
 Suite *store_suite(void);
 Suite *report_suite(void);
 Suite *autotune_suite(void);
+Suite *packet_path_suite(void);
 
 int main(void)
 {
@@ -33,6 +34,7 @@ int main(void)
     srunner_add_suite(sr, store_suite());
     srunner_add_suite(sr, report_suite());
     srunner_add_suite(sr, autotune_suite());
+    srunner_add_suite(sr, packet_path_suite());
 
     srunner_run_all(sr, CK_NORMAL);
     failed = srunner_ntests_failed(sr);

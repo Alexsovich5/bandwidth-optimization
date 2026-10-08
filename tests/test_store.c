@@ -337,6 +337,43 @@ START_TEST(test_open_missing_dir_fails)
 }
 END_TEST
 
+/*
+ * bw_store_query_all sizes its result itself: 5 interfaces x 5 classes is
+ * more pairs than its first allocation, and every pair must come back.
+ */
+START_TEST(test_query_all_allocates_every_row)
+{
+    static const char *ifaces[] = { "eth0", "eth1", "eth2", "eth3", "eth4" };
+    struct bw_store_stat *rows = (struct bw_store_stat *)1;
+    int i, n;
+
+    open_ok();
+    n = bw_store_query_all(db, NULL, 0, 0, &rows);
+    ck_assert_int_eq(n, 0);
+    ck_assert_msg(rows == NULL, "no rows must give a NULL array");
+
+    for (i = 0; i < 5; i++)
+        put_three_intervals(ifaces[i]);
+    n = bw_store_query_all(db, NULL, 0, 0, &rows);
+    ck_assert_int_eq(n, 25);
+    ck_assert(rows != NULL);
+    for (i = 0; i < 5; i++) {
+        const struct bw_store_stat *r = find(rows, n, ifaces[i], "high_priority");
+
+        ASSERT_U64_EQ(r->samples, 3);
+        ASSERT_U64_EQ(r->avg_bps, 200);
+        ASSERT_U64_EQ(r->peak_bps, 300);
+        find(rows, n, ifaces[i], "unclassified");
+    }
+    free(rows);
+
+    n = bw_store_query_all(db, "eth3", 0, 2, &rows);
+    ck_assert_int_eq(n, 5);
+    ck_assert_str_eq(rows[0].iface, "eth3");
+    free(rows);
+}
+END_TEST
+
 Suite *store_suite(void)
 {
     Suite *s = suite_create("store");
@@ -352,6 +389,7 @@ Suite *store_suite(void)
     tcase_add_test(tc, test_out_of_range_index_stored_as_unclassified);
     tcase_add_test(tc, test_tuning_round_trip);
     tcase_add_test(tc, test_open_missing_dir_fails);
+    tcase_add_test(tc, test_query_all_allocates_every_row);
     suite_add_tcase(s, tc);
     return s;
 }

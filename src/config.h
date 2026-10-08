@@ -7,6 +7,7 @@
 #define BW_MAX_CLASSES 8
 #define BW_MAX_APPS    64
 #define BW_NAME_MAX    32   /* including the terminating NUL */
+#define BW_IFACE_MAX   16   /* IFNAMSIZ, including the terminating NUL */
 
 /* Payload signature an application may request with <app>.signature. */
 enum bw_sig {
@@ -43,7 +44,7 @@ struct bw_autotune_cfg {
 };
 
 struct bw_config {
-    char iface[16];
+    char iface[BW_IFACE_MAX];
     uint64_t total_bps;
     int default_class;
     struct bw_class classes[BW_MAX_CLASSES];
@@ -62,6 +63,14 @@ struct bw_config {
  * problem has no single line) into err.
  */
 int bw_config_load(const char *path, struct bw_config *out, char *err, size_t errlen);
+
+/*
+ * True when s can be used as an interface name: 1-15 characters from
+ * [A-Za-z0-9_.-], not starting with '-' and not "." or "..". Interface
+ * names end up in tc and iptables command lines run through /bin/sh, so
+ * every name from the policy file or the command line is checked with this.
+ */
+int bw_iface_valid(const char *s);
 
 /* Index of the class called name, or -1. */
 int bw_config_find_class(const struct bw_config *cfg, const char *name);

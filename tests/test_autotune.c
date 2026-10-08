@@ -207,7 +207,7 @@ START_TEST(test_random_inputs_keep_sum_and_floors)
     uint64_t floor_bps[BW_MAX_CLASSES];
     int iter, i;
 
-    lcg_state = 20130917u;
+    lcg_state = 0x9e3779b9u;
     for (iter = 0; iter < 1000; iter++) {
         struct bw_config c;
         unsigned left = 100;

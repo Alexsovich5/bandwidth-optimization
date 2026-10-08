@@ -10,6 +10,8 @@ int bw_qos_script(const struct bw_config *cfg, const char *iface, FILE *out)
     const char *dev = iface != NULL ? iface : cfg->iface;
     int i;
 
+    if (!bw_iface_valid(dev))
+        return -1;
     fprintf(out, "tc qdisc add dev %s root handle 1: htb default %u\n",
             dev, cfg->classes[cfg->default_class].classid_minor);
     fprintf(out, "tc class add dev %s parent 1: classid " BW_QOS_PARENT
@@ -42,6 +44,8 @@ int bw_qos_script(const struct bw_config *cfg, const char *iface, FILE *out)
 
 int bw_qos_clear_script(const char *iface, FILE *out)
 {
+    if (!bw_iface_valid(iface))
+        return -1;
     fprintf(out, "tc qdisc del dev %s root\n", iface);
     return ferror(out) ? -1 : 0;
 }
@@ -52,7 +56,7 @@ int bw_qos_change_line(const struct bw_config *cfg, const char *iface, int class
     const char *dev = iface != NULL ? iface : cfg->iface;
     const struct bw_class *c;
 
-    if (class_idx < 0 || class_idx >= cfg->nclasses)
+    if (class_idx < 0 || class_idx >= cfg->nclasses || !bw_iface_valid(dev))
         return -1;
     c = &cfg->classes[class_idx];
     fprintf(out, "tc class change dev %s parent " BW_QOS_PARENT " classid 1:%u htb rate %"

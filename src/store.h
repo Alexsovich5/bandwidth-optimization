@@ -15,7 +15,7 @@
 
 /* Aggregate of the samples of one (iface, class) pair. */
 struct bw_store_stat {
-    char iface[16];
+    char iface[BW_IFACE_MAX];
     char cls[BW_NAME_MAX];
     uint64_t samples;          /* rows considered */
     uint64_t packets, bytes;   /* sums over those rows */
@@ -66,5 +66,16 @@ int bw_store_latest_rate(sqlite3 *db, const char *iface, const char *cls, uint64
  */
 int bw_store_query(sqlite3 *db, const char *iface, time_t since, int last_n,
                    struct bw_store_stat *out, int max);
+
+/*
+ * The same query in one pass, into an array it allocates: *out receives
+ * the rows (NULL when there are none), to be released with free(), and
+ * the return value is their number, or -1 on error (*out is then NULL).
+ * Unlike counting with bw_store_query and then filling a buffer of that
+ * size, rows written in between by a running monitor cannot make the
+ * count and the buffer disagree.
+ */
+int bw_store_query_all(sqlite3 *db, const char *iface, time_t since, int last_n,
+                       struct bw_store_stat **out);
 
 #endif

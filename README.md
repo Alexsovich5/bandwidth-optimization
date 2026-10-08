@@ -21,7 +21,10 @@ Personal project built on the 2013-era stack (C99, libpcap 1.3, SQLite 3.7, tc/H
   `bwopt check-config`.
 - Packet decoder for Ethernet II, 802.1Q VLAN and Linux cooked capture (SLL), IPv4 with
   options and fragments, and TCP/UDP ports and payload offset (`src/packet.c`;
-  `tests/test_packet.c`).
+  `tests/test_packet.c`). Every read is checked against the captured length; frames that do
+  not decode are printed as `undecoded` from the pcap record lengths. `tests/test_packet_path.c`
+  feeds every truncation of the fixture frames and 4000 fixed-seed random frames through
+  decode, classify, print and DSCP rewrite, and runs under valgrind and AddressSanitizer.
 - Classifier using port and port-range rules in either direction, a payload-signature
   matcher for HTTP request methods, SIP and TLS handshake records, a fallback to the default
   class, and `unclassified` for non-IPv4 frames (`src/classifier.c`, `src/signatures.c`;
@@ -39,7 +42,10 @@ Personal project built on the 2013-era stack (C99, libpcap 1.3, SQLite 3.7, tc/H
   on the DSCP field (`src/qos.c`; `tests/test_qos.c`, `tests/golden/policies.tc`,
   `tests/integration/test_tc_script.sh`).
 - `bwopt apply` and `bwopt clear`, with `--dry-run` printing the commands instead of running
-  them (`src/exec.c`; `tests/test_exec.c`, `tests/integration/test_apply.sh`).
+  them (`src/exec.c`; `tests/test_exec.c`, `tests/integration/test_apply.sh`). Interface
+  names from the policy file or `-i` are limited to `[A-Za-z0-9_.-]` (1-15 characters, no
+  leading `-`) before they reach a shell command line (`tests/test_config.c`,
+  `tests/integration/test_tc_script.sh`).
 - Monitoring: per-class packet and byte counters fed from a live interface or a pcap file,
   bits per second per interval written to SQLite, a log file, and a clean stop on
   SIGINT/SIGTERM or after `--duration` (`src/monitor.c`, `src/store.c`;
@@ -52,8 +58,13 @@ Personal project built on the 2013-era stack (C99, libpcap 1.3, SQLite 3.7, tc/H
   kept at or below the total. Changes are issued as full-parameter `tc class change` lines
   and logged to SQLite; available as `bwopt autotune` and `bwopt monitor --autotune`
   (`src/autotune.c`; `tests/test_autotune.c`, `tests/integration/test_autotune.sh`).
-- Build and install: `make`, `make install PREFIX=... DESTDIR=...`, `make test` and
-  `make memcheck` (valgrind) (`Makefile`; `tests/integration/test_install.sh`).
+- Build and install: `make`, `make install PREFIX=... DESTDIR=...`, `make test`, and the
+  `make memcheck` (valgrind) and `make asan` (AddressSanitizer) targets that `make test` also
+  runs (`Makefile`; `tests/integration/test_install.sh`).
+- Image packages are downloaded over HTTPS from `snapshot.debian.org` and verified (Release
+  signature with `gpgv` against the Debian archive keyrings, then `Packages` and `.deb`
+  SHA256) before the wheezy stage installs them with `dpkg`; the image has no apt sources
+  (`docker/apt/fetch-debs.sh`; `tests/integration/test_apt_sources.sh`).
 
 **Not implemented / known limitations**
 
@@ -82,8 +93,11 @@ Personal project built on the 2013-era stack (C99, libpcap 1.3, SQLite 3.7, tc/H
   foreground.
 - Auto-tuning is a heuristic over the average bps per window. It does not measure latency or
   queue delay, and no efficiency gain is measured or claimed.
-- The image builds from `archive.debian.org` with expired-key apt settings, and the build may
-  break if the archive moves.
+- The image build needs `snapshot.debian.org`; if it is unreachable, or an index or package
+  no longer matches its signature or checksum, the build fails.
+- AddressSanitizer uses GCC 4.8.1 and glibc 2.17 from a jessie snapshot, unpacked into
+  `/opt/asan` beside the wheezy toolchain, because GCC 4.7 has no ASan. The shipped binary is
+  still built with GCC 4.7.
 - Some Debian package revisions are later rebuilds of period upstream versions (libc6
   `2.13-38+deb7u12`, sqlite3 `3.7.13-1+deb7u2`, git `1:1.7.10.4-1+wheezy3`), because the only
   pullable wheezy image and archive are the 7.11 point release. The period state is
@@ -92,7 +106,8 @@ Personal project built on the 2013-era stack (C99, libpcap 1.3, SQLite 3.7, tc/H
 
 ## Built with
 
-All dependencies are Debian 7 (wheezy) packages pinned to exact versions in the `Dockerfile`.
+All dependencies are Debian 7 (wheezy) packages pinned to exact versions in
+`docker/apt/period.lock`.
 Every upstream version was released on or before 2013-09-30; the Debian revisions marked
 "rebuild" are later security rebuilds of the same upstream version.
 
@@ -106,6 +121,8 @@ Every upstream version was released on or before 2013-09-30; the Debian revision
 - **Check** 0.9.8 (`check=0.9.8-2`), **pkg-config** 0.26 (`pkg-config=0.26-1`) and
   **Valgrind** 3.7.0 (`valgrind=1:3.7.0-6`) for the tests
 - **git** 1.7.10.4 (`git=1:1.7.10.4-1+wheezy3`, rebuild), used only by the README layout check
+- **GCC** 4.8.1 (`gcc-4.8=4.8.1-10` from the jessie snapshot of 2013-09-30, `docker/apt/asan.lock`),
+  used only by `make asan`
 - Base image `debian:wheezy` (the 7.11 point release)
 
 ## Running it
@@ -124,8 +141,9 @@ docker compose run --rm demo
 
 ```bash
 docker compose run --rm bwopt make test
-docker compose run --rm bwopt make memcheck
 ```
+
+`make test` runs the unit suites, the integration scripts, `make memcheck` and `make asan`.
 
 The Check unit suites cover the parser, decoder, classifier, signatures, tc and iptables
 generation, exec modes, counters, SQLite store, report and auto-tuning; the integration
@@ -141,6 +159,12 @@ Makefile
 README.md
 config/
   policies.conf
+docker/
+  apt/
+    asan.lock
+    fetch-debs.sh
+    period.lock
+    sources.conf
 docker-compose.yml
 docs/
   IMPLEMENTATION_PLAN.md
@@ -199,6 +223,7 @@ tests/
   integration/
     lib.sh
     test_apply.sh
+    test_apt_sources.sh
     test_autotune.sh
     test_classify.sh
     test_cli.sh
@@ -216,6 +241,7 @@ tests/
   test_exec.c
   test_monitor.c
   test_packet.c
+  test_packet_path.c
   test_qos.c
   test_report.c
   test_signatures.c

@@ -1,22 +1,28 @@
-FROM debian:wheezy
+# Stage 1: download and verify every package on a current Debian, over HTTPS
+# from snapshot.debian.org (see docker/apt/fetch-debs.sh).
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS fetch
 
-RUN printf '%s\n' \
-        'deb http://archive.debian.org/debian wheezy main' \
-        'deb http://archive.debian.org/debian-security wheezy/updates main' \
-        > /etc/apt/sources.list \
-    && printf '%s\n' \
-        'Acquire::Check-Valid-Until "false";' \
-        'APT::Get::AllowUnauthenticated "true";' \
-        > /etc/apt/apt.conf.d/10archive \
-    && apt-get update \
-    && apt-get install -y --force-yes --no-install-recommends \
-        build-essential=11.5 gcc-4.7=4.7.2-5 make=3.81-8.2 \
-        libc6-dev=2.13-38+deb7u12 libc-dev-bin=2.13-38+deb7u12 libc6-dbg=2.13-38+deb7u12 \
-        libpcap0.8-dev=1.3.0-1 \
-        libsqlite3-0=3.7.13-1+deb7u2 libsqlite3-dev=3.7.13-1+deb7u2 sqlite3=3.7.13-1+deb7u2 \
-        check=0.9.8-2 iproute=20120521-3+b3 iptables=1.4.14-3.1 pkg-config=0.26-1 \
-        valgrind=1:3.7.0-6 git=1:1.7.10.4-1+wheezy3 git-man=1:1.7.10.4-1+wheezy3 \
-    && rm -rf /var/lib/apt/lists/* \
+RUN for i in 1 2 3; do apt-get update && break; sleep 10; done \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl gpgv debian-archive-keyring \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/apt/ /apt/
+RUN bash /apt/fetch-debs.sh /apt/sources.conf /apt/period.lock /debs/period \
+    && bash /apt/fetch-debs.sh /apt/sources.conf /apt/asan.lock /debs/asan \
+    && mkdir -p /opt/asan/tmp /opt/asan/build \
+    && for d in /debs/asan/*.deb; do dpkg-deb -x "$d" /opt/asan; done
+
+# Stage 2: the wheezy build and test image. Packages come only from the
+# verified set above; the image has no apt sources at all.
+FROM debian:wheezy@sha256:2259b099d947443e44bbd1c94967c785361af8fd22df48a08a3942e2d5630849
+
+RUN --mount=type=bind,from=fetch,source=/debs/period,target=/tmp/debs \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+    && dpkg -i /tmp/debs/*.deb \
     && gcc --version && valgrind --version && iptables -V && git --version
+
+COPY --from=fetch /opt/asan /opt/asan
+RUN chroot /opt/asan /usr/bin/gcc-4.8 --version
 
 WORKDIR /src
