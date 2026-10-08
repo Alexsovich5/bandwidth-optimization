@@ -1,0 +1,12 @@
+# libpcap 1.3.0 leaks a strdup'd string inside pcap_fopen_offline when the
+# file is rejected (bad magic). pcap_open_offline returns NULL, so the caller
+# has no handle through which to free it.
+{
+   libpcap_fopen_offline_rejected_file
+   Memcheck:Leak
+   fun:malloc
+   fun:strdup
+   obj:*/libpcap.so.1.3.0
+   fun:pcap_fopen_offline
+   fun:pcap_open_offline
+}

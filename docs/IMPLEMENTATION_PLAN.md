@@ -209,7 +209,10 @@ Common conventions:
   fixed. Doing this now means leaks in the decoder, classifier and capture code are caught
   before more code depends on them.
 - **Files**: modify `Makefile` (target `memcheck`, depends on `fixtures`) and `src/*.c` (only
-  for leak fixes).
+  for leak fixes); create `tests/valgrind.supp`, passed with `--suppressions`. It holds a single
+  entry for a leak inside libpcap 1.3.0 itself: `pcap_open_offline` on a rejected file (bad
+  magic) loses a `strdup`'d string and returns NULL, so the caller has nothing to free. Leaks in
+  this project's code are never suppressed.
 - **Tests first**: `make memcheck` is run before any fix and must exit 0 after the fixes.
 - **Acceptance**: `docker compose run --rm bwopt sh -c 'make test && make memcheck'`
 - **Commit message**:

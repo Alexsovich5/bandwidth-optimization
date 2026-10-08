@@ -58,6 +58,12 @@ integration: $(TARGET)
 
 test: fixtures unit integration
 
+VALGRIND = valgrind --error-exitcode=1 --leak-check=full --suppressions=tests/valgrind.supp
+
+memcheck: fixtures $(TEST_RUNNER) $(TARGET)
+	CK_FORK=no $(VALGRIND) ./$(TEST_RUNNER)
+	$(VALGRIND) ./$(TARGET) classify -r $(FIXTURE_DIR)/mixed.pcap > /dev/null
+
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 0755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(TARGET)
@@ -68,4 +74,4 @@ clean:
 	rm -f $(SRCDIR)/*.o $(LIB) $(TARGET) $(TEST_RUNNER) $(GEN_PCAP)
 	rm -rf $(FIXTURE_DIR)
 
-.PHONY: all fixtures unit integration test install clean
+.PHONY: all fixtures unit integration test memcheck install clean
