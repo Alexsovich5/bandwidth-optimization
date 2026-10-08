@@ -298,8 +298,9 @@ Common conventions:
   - create `src/exec.c`, `src/exec.h`, `tests/test_exec.c`
   - create `tests/integration/test_apply.sh` and `tests/integration/lib.sh`:
     - create and remove dummy `bw0` 10.99.0.1/24
-    - best-effort `sysctl -w net.ipv6.conf.bw0.disable_ipv6=1 || true` to cut stray IPv6
-      ND/MLD frames (`/proc/sys` may be read-only in the container)
+    - best-effort `echo 1 > /proc/sys/net/ipv6/conf/bw0/disable_ipv6` (errors ignored) to cut
+      stray IPv6 ND/MLD frames; the image has no procps, so there is no `sysctl`, and
+      `/proc/sys` may be read-only in the container
     - a `send_udp PORT N` helper using bash `/dev/udp/10.99.0.2/PORT` (the scripts run under
       `bash -e`)
   - modify `src/main.c`

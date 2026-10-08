@@ -15,6 +15,7 @@
 #include "classifier.h"
 #include "config.h"
 #include "dscp.h"
+#include "exec.h"
 #include "packet.h"
 #include "qos.h"
 #include "version.h"
@@ -46,6 +47,9 @@ static void usage(FILE *out)
             "                         pcap file according to their class\n"
             "  dscp-script            print the iptables DSCP marking rules\n"
             "  tc-script              print the tc commands for the HTB shaping tree\n"
+            "  apply                  install the HTB tree and DSCP rules on the interface,\n"
+            "                         replacing any previous policy\n"
+            "  clear                  remove the HTB tree and DSCP rules from the interface\n"
             "\n"
             "Options:\n"
             "  -c, --config FILE      policy file (default config/policies.conf)\n"
@@ -53,6 +57,7 @@ static void usage(FILE *out)
             "  -r, --read FILE        pcap file to read\n"
             "  -w, --write FILE       pcap file to write\n"
             "  --summary              print packets and bytes per class instead\n"
+            "  --dry-run              print the commands apply/clear would run\n"
             "  --version              print the version and exit\n"
             "  --help                 print this help and exit\n");
 }
@@ -354,6 +359,84 @@ static int cmd_tc_script(const char *config_file, const char *iface)
     return 0;
 }
 
+enum { SCRIPT_CLEAR, SCRIPT_APPLY };
+
+/*
+ * Builds the clear script (tc, then iptables) or the apply script (tc tree,
+ * then DSCP rules) in a malloc'd string. Returns NULL on failure.
+ */
+static char *build_script(const struct bw_config *cfg, const char *iface, int which)
+{
+    FILE *f = tmpfile();
+    char *buf = NULL;
+    long len;
+    int rc;
+
+    if (f == NULL)
+        return NULL;
+    if (which == SCRIPT_CLEAR)
+        rc = bw_qos_clear_script(iface, f) | bw_dscp_clear_script(cfg, iface, f);
+    else
+        rc = bw_qos_script(cfg, iface, f) | bw_dscp_script(cfg, iface, f);
+    if (rc == 0 && fflush(f) == 0 && (len = ftell(f)) >= 0
+        && (buf = malloc((size_t)len + 1)) != NULL) {
+        rewind(f);
+        if (fread(buf, 1, (size_t)len, f) != (size_t)len) {
+            free(buf);
+            buf = NULL;
+        } else {
+            buf[len] = '\0';
+        }
+    }
+    fclose(f);
+    return buf;
+}
+
+/*
+ * apply: removes any previous policy ignoring errors (on a fresh interface
+ * there is nothing to remove), then installs the new one, stopping at the
+ * first failing command. clear: removes the policy, reporting failures.
+ */
+static int cmd_apply_clear(const char *config_file, const char *iface, int apply,
+                           int dry_run)
+{
+    struct bw_config cfg;
+    char *clear_script, *apply_script = NULL;
+    int dry = dry_run ? BW_EXEC_DRY_RUN : 0;
+    int rc = 0;
+
+    if (load_config(config_file, &cfg) != 0)
+        return EXIT_USAGE;
+    if (iface == NULL)
+        iface = cfg.iface;
+
+    clear_script = build_script(&cfg, iface, SCRIPT_CLEAR);
+    if (apply)
+        apply_script = build_script(&cfg, iface, SCRIPT_APPLY);
+    if (clear_script == NULL || (apply && apply_script == NULL)) {
+        fprintf(stderr, "bwopt: cannot build the command script\n");
+        rc = EXIT_RUNTIME;
+    } else if (apply) {
+        bw_exec_run(clear_script, dry | BW_EXEC_IGNORE_ERRORS, stdout);
+        if (bw_exec_run(apply_script, dry, stdout) != 0)
+            rc = EXIT_RUNTIME;
+        else if (!dry_run)
+            printf("applied policy %s to %s\n", config_file, iface);
+    } else {
+        if (bw_exec_run(clear_script, dry, stdout) != 0)
+            rc = EXIT_RUNTIME;
+        else if (!dry_run)
+            printf("cleared policy from %s\n", iface);
+    }
+    free(clear_script);
+    free(apply_script);
+    if (dry_run && fflush(stdout) != 0) {
+        fprintf(stderr, "bwopt: write error\n");
+        rc = EXIT_RUNTIME;
+    }
+    return rc;
+}
+
 int main(int argc, char *argv[])
 {
     const char *interface = NULL;   /* NULL: interface= from the policy */
@@ -362,6 +445,7 @@ int main(int argc, char *argv[])
     const char *read_file = NULL;
     const char *write_file = NULL;
     int summary = 0;
+    int dry_run = 0;
     int i;
 
     for (i = 1; i < argc; i++) {
@@ -385,6 +469,8 @@ int main(int argc, char *argv[])
             write_file = argv[++i];
         } else if (strcmp(argv[i], "--summary") == 0) {
             summary = 1;
+        } else if (strcmp(argv[i], "--dry-run") == 0) {
+            dry_run = 1;
         } else if (argv[i][0] != '-' && command == NULL) {
             command = argv[i];
         } else {
@@ -412,6 +498,10 @@ int main(int argc, char *argv[])
         return cmd_dscp_script(config_file, interface);
     if (strcmp(command, "tc-script") == 0)
         return cmd_tc_script(config_file, interface);
+    if (strcmp(command, "apply") == 0)
+        return cmd_apply_clear(config_file, interface, 1, dry_run);
+    if (strcmp(command, "clear") == 0)
+        return cmd_apply_clear(config_file, interface, 0, dry_run);
 
     fprintf(stderr, "bwopt: unknown command '%s'\n", command);
     usage(stderr);
