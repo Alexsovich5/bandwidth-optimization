@@ -83,6 +83,23 @@ int bw_capture_loop(struct bw_capture *cap, int count,
     return r.count;
 }
 
+int bw_capture_dispatch(struct bw_capture *cap, bw_capture_handler handler, u_char *user)
+{
+    struct relay r;
+    int rc;
+
+    r.handler = handler;
+    r.user = user;
+    r.dlt = cap->dlt;
+    r.count = 0;
+    rc = pcap_dispatch(cap->pcap, -1, relay_frame, (u_char *)&r);
+    if (rc == -2)
+        return BW_CAPTURE_BROKEN;
+    if (rc == -1)
+        return -1;
+    return r.count;
+}
+
 void bw_capture_break(struct bw_capture *cap)
 {
     if (cap->pcap != NULL)

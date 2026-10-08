@@ -4,12 +4,16 @@
  * Real-time traffic classification and QoS management system
  */
 
+#include <errno.h>
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "capture.h"
 #include "classifier.h"
@@ -29,12 +33,20 @@
 #define PROTO_TCP      6
 #define PROTO_UDP      17
 
+#define LIVE_SNAPLEN    256
+#define LIVE_TIMEOUT_MS 100
+
 static volatile sig_atomic_t running = 1;
+
+/* The live capture to interrupt on SIGINT/SIGTERM, if any. */
+static struct bw_capture *volatile active_capture;
 
 static void signal_handler(int signum)
 {
     (void)signum;
     running = 0;
+    if (active_capture != NULL)
+        bw_capture_break(active_capture);
 }
 
 static void usage(FILE *out)
@@ -55,6 +67,8 @@ static void usage(FILE *out)
             "  clear                  remove the HTB tree and DSCP rules from the interface\n"
             "  monitor -r FILE        replay a pcap file, counting traffic per class and\n"
             "                         storing bits per second for every interval in SQLite\n"
+            "  monitor -i IFACE       the same on live traffic, until SIGINT/SIGTERM or\n"
+            "                         --duration, logging each interval\n"
             "  report --db PATH       print per-class totals and average/peak bit/s\n"
             "\n"
             "Options:\n"
@@ -66,6 +80,8 @@ static void usage(FILE *out)
             "  --dry-run              print the commands apply/clear would run\n"
             "  --db PATH              SQLite database (default: database= in the policy)\n"
             "  --interval S           seconds per sample (default: update_interval=)\n"
+            "  --duration S           live monitor: stop after S seconds\n"
+            "  --log PATH             live monitor log, appended to (default: log_file=)\n"
             "  --since UNIX_TS        report: only samples with ts >= UNIX_TS\n"
             "  --iface IFACE          report: only samples of this interface\n"
             "  --version              print the version and exit\n"
@@ -459,22 +475,65 @@ struct monitor_state {
     time_t next;               /* end of the current interval */
     struct timeval last_ts;    /* timestamp of the latest packet */
     unsigned long packets, flushes;
+    FILE *log;                 /* live runs only */
     int failed;
 };
+
+/* Appends one timestamped line to the monitor log and flushes it. */
+static void log_line(FILE *log, const char *fmt, ...)
+{
+    char stamp[32];
+    time_t now = time(NULL);
+    struct tm tm;
+    va_list ap;
+
+    if (log == NULL)
+        return;
+    if (localtime_r(&now, &tm) == NULL || strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm) == 0)
+        snprintf(stamp, sizeof stamp, "%ld", (long)now);
+    fprintf(log, "%s bwopt[%ld]: ", stamp, (long)getpid());
+    va_start(ap, fmt);
+    vfprintf(log, fmt, ap);
+    va_end(ap);
+    fputc('\n', log);
+    fflush(log);
+}
 
 /* Writes the counters as samples ending at now; stops the loop on error. */
 static void monitor_flush(struct monitor_state *st, time_t now)
 {
     struct bw_sample samples[BW_MONITOR_MAX_SAMPLES];
     int n = bw_monitor_flush(&st->mon, now, samples);
+    uint64_t packets = 0, bytes = 0;
+    int i;
 
     if (bw_store_put(st->db, st->iface, st->cfg, samples, n) != SQLITE_OK) {
         fprintf(stderr, "bwopt: %s: %s\n", st->db_path, sqlite3_errmsg(st->db));
+        log_line(st->log, "error: %s: %s", st->db_path, sqlite3_errmsg(st->db));
         st->failed = 1;
         bw_capture_break(st->cap);
         return;
     }
     st->flushes++;
+    for (i = 0; i < n; i++) {
+        packets += samples[i].packets;
+        bytes += samples[i].bytes;
+    }
+    log_line(st->log, "flush ts=%ld packets=%" PRIu64 " bytes=%" PRIu64,
+             (long)now, packets, bytes);
+}
+
+/* Classifies one frame and adds it to the current interval's counters. */
+static void monitor_count(struct monitor_state *st, int dlt, const struct pcap_pkthdr *hdr,
+                          const u_char *bytes)
+{
+    struct bw_packet pkt;
+    int idx = -1;
+
+    if (bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) == 0)
+        idx = bw_classify(st->cfg, &pkt);
+    bw_monitor_add(&st->mon, idx, hdr->len);
+    st->packets++;
 }
 
 /*
@@ -486,9 +545,7 @@ static void monitor_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
                           const u_char *bytes)
 {
     struct monitor_state *st = (struct monitor_state *)user;
-    struct bw_packet pkt;
     time_t ts = hdr->ts.tv_sec;
-    int idx = -1;
 
     if (st->failed)
         return;
@@ -503,11 +560,18 @@ static void monitor_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
             return;
         st->next += (time_t)st->interval;
     }
-    if (bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) == 0)
-        idx = bw_classify(st->cfg, &pkt);
-    bw_monitor_add(&st->mon, idx, hdr->len);
+    monitor_count(st, dlt, hdr, bytes);
     st->last_ts = hdr->ts;
-    st->packets++;
+}
+
+/* Live frames are counted only; intervals follow the wall clock. */
+static void monitor_live_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
+                               const u_char *bytes)
+{
+    struct monitor_state *st = (struct monitor_state *)user;
+
+    if (!st->failed)
+        monitor_count(st, dlt, hdr, bytes);
 }
 
 /*
@@ -537,8 +601,63 @@ static int parse_seconds(const char *s, unsigned long max, unsigned long *out)
     return 0;
 }
 
-static int cmd_monitor(const char *config_file, const char *pcap_file, const char *db_path,
-                       unsigned interval)
+/*
+ * Captures until a signal, the end of --duration (0: none) or an error,
+ * flushing every interval by the wall clock, then writes a final flush
+ * of the partial interval. Returns 0 or EXIT_RUNTIME.
+ */
+static int monitor_live(struct monitor_state *st, unsigned long duration)
+{
+    struct timeval now, deadline;
+    const char *reason = "signal";
+    int n, rc = 0;
+
+    gettimeofday(&now, NULL);
+    bw_monitor_init(&st->mon, st->cfg->nclasses, now.tv_sec);
+    st->started = 1;
+    st->next = now.tv_sec + (time_t)st->interval;
+    deadline = now;
+    deadline.tv_sec += (time_t)duration;
+
+    while (running && !st->failed) {
+        n = bw_capture_dispatch(st->cap, monitor_live_frame, (u_char *)st);
+        if (n == -1) {
+            fprintf(stderr, "bwopt: %s: %s\n", st->iface, bw_capture_error(st->cap));
+            log_line(st->log, "error: %s: %s", st->iface, bw_capture_error(st->cap));
+            reason = "capture error";
+            rc = EXIT_RUNTIME;
+            break;
+        }
+        gettimeofday(&now, NULL);
+        while (!st->failed && now.tv_sec >= st->next) {
+            monitor_flush(st, st->next);
+            st->next += (time_t)st->interval;
+        }
+        if (duration > 0 && !timercmp(&now, &deadline, <)) {
+            reason = "duration";
+            break;
+        }
+    }
+
+    /*
+     * The final interval ends now, or one second after it began when that
+     * is still the current second (sample times are whole seconds and
+     * unique per interface and class).
+     */
+    if (!st->failed)
+        monitor_flush(st, now.tv_sec > st->mon.last ? now.tv_sec : st->mon.last + 1);
+    if (st->failed) {
+        reason = "database error";
+        rc = EXIT_RUNTIME;
+    }
+    log_line(st->log, "monitor stopped on %s (%s): %lu packets, %lu intervals",
+             st->iface, reason, st->packets, st->flushes);
+    return rc;
+}
+
+static int cmd_monitor(const char *config_file, const char *pcap_file, const char *live_iface,
+                       const char *db_path, const char *log_path, unsigned interval,
+                       unsigned long duration)
 {
     struct bw_config cfg;
     struct bw_capture cap;
@@ -546,37 +665,66 @@ static int cmd_monitor(const char *config_file, const char *pcap_file, const cha
     char err[PCAP_ERRBUF_SIZE + 64];
     int rc = 0;
 
-    if (pcap_file == NULL) {
-        fprintf(stderr, "bwopt: monitor needs -r FILE\n");
+    if ((pcap_file == NULL) == (live_iface == NULL)) {
+        fprintf(stderr, "bwopt: monitor needs either -r FILE or -i IFACE\n");
         usage(stderr);
+        return EXIT_USAGE;
+    }
+    if (pcap_file != NULL && duration > 0) {
+        fprintf(stderr, "bwopt: --duration applies to -i IFACE only\n");
         return EXIT_USAGE;
     }
     if (load_config(config_file, &cfg) != 0)
         return EXIT_USAGE;
     if (db_path == NULL)
         db_path = cfg.database;
+    if (log_path == NULL)
+        log_path = cfg.log_file;
     if (interval == 0)
         interval = cfg.update_interval;
 
-    if (bw_capture_open_offline(&cap, pcap_file, err, sizeof err) != 0) {
+    memset(&st, 0, sizeof st);
+    if (pcap_file != NULL && bw_capture_open_offline(&cap, pcap_file, err, sizeof err) != 0) {
         fprintf(stderr, "bwopt: %s\n", err);
         return EXIT_RUNTIME;
     }
-    memset(&st, 0, sizeof st);
     if (bw_store_open(db_path, &st.db) != SQLITE_OK) {
         fprintf(stderr, "bwopt: %s: %s\n", db_path,
                 st.db ? sqlite3_errmsg(st.db) : "out of memory");
         bw_store_close(st.db);
-        bw_capture_close(&cap);
+        if (pcap_file != NULL)
+            bw_capture_close(&cap);
         return EXIT_RUNTIME;
+    }
+    if (live_iface != NULL) {
+        st.log = fopen(log_path, "a");
+        if (st.log == NULL) {
+            fprintf(stderr, "bwopt: %s: %s\n", log_path, strerror(errno));
+            bw_store_close(st.db);
+            return EXIT_RUNTIME;
+        }
+        if (bw_capture_open_live(&cap, live_iface, LIVE_SNAPLEN, 0, LIVE_TIMEOUT_MS,
+                                 err, sizeof err) != 0) {
+            fprintf(stderr, "bwopt: %s\n", err);
+            log_line(st.log, "error: %s", err);
+            fclose(st.log);
+            bw_store_close(st.db);
+            return EXIT_RUNTIME;
+        }
     }
     st.cfg = &cfg;
     st.cap = &cap;
     st.db_path = db_path;
-    st.iface = cfg.iface;
+    st.iface = live_iface != NULL ? live_iface : cfg.iface;
     st.interval = interval;
 
-    if (bw_capture_loop(&cap, -1, monitor_frame, (u_char *)&st) < 0) {
+    if (live_iface != NULL) {
+        log_line(st.log, "monitor started on %s (interval %us, database %s)",
+                 live_iface, interval, db_path);
+        active_capture = &cap;
+        rc = monitor_live(&st, duration);
+        active_capture = NULL;
+    } else if (bw_capture_loop(&cap, -1, monitor_frame, (u_char *)&st) < 0) {
         fprintf(stderr, "bwopt: %s: %s\n", pcap_file, bw_capture_error(&cap));
         rc = EXIT_RUNTIME;
     } else if (!st.failed && st.started) {
@@ -584,12 +732,17 @@ static int cmd_monitor(const char *config_file, const char *pcap_file, const cha
     }
     if (st.failed)
         rc = EXIT_RUNTIME;
+    if (st.log != NULL && fclose(st.log) != 0 && rc == 0) {
+        fprintf(stderr, "bwopt: %s: write error\n", log_path);
+        rc = EXIT_RUNTIME;
+    }
     bw_store_close(st.db);
     bw_capture_close(&cap);
 
     if (rc == 0)
         printf("monitor: %lu packets from %s, %lu intervals of %us written to %s\n",
-               st.packets, pcap_file, st.flushes, interval, db_path);
+               st.packets, pcap_file != NULL ? pcap_file : live_iface, st.flushes,
+               interval, db_path);
     return rc;
 }
 
@@ -639,6 +792,8 @@ int main(int argc, char *argv[])
     const char *write_file = NULL;
     const char *db_path = NULL;     /* NULL: database= from the policy */
     unsigned long interval = 0;     /* 0: update_interval= from the policy */
+    const char *log_path = NULL;    /* NULL: log_file= from the policy */
+    unsigned long duration = 0;     /* 0: until SIGINT/SIGTERM */
     unsigned long since = 0;
     int summary = 0;
     int dry_run = 0;
@@ -670,6 +825,14 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--interval") == 0 && i + 1 < argc) {
             if (parse_seconds(argv[++i], 86400, &interval) != 0 || interval == 0) {
                 fprintf(stderr, "bwopt: --interval '%s' must be 1-86400 seconds\n", argv[i]);
+                return EXIT_USAGE;
+            }
+        } else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
+            log_path = argv[++i];
+        } else if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc) {
+            if (parse_seconds(argv[++i], 0x7fffffffUL, &duration) != 0 || duration == 0) {
+                fprintf(stderr, "bwopt: --duration '%s' must be a positive number of seconds\n",
+                        argv[i]);
                 return EXIT_USAGE;
             }
         } else if (strcmp(argv[i], "--since") == 0 && i + 1 < argc) {
@@ -713,7 +876,8 @@ int main(int argc, char *argv[])
     if (strcmp(command, "clear") == 0)
         return cmd_apply_clear(config_file, interface, 0, dry_run);
     if (strcmp(command, "monitor") == 0)
-        return cmd_monitor(config_file, read_file, db_path, (unsigned)interval);
+        return cmd_monitor(config_file, read_file, interface, db_path, log_path,
+                           (unsigned)interval, duration);
     if (strcmp(command, "report") == 0)
         return cmd_report(db_path, interface, (time_t)since);
 

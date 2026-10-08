@@ -199,6 +199,66 @@ START_TEST(test_offline_not_a_pcap)
 }
 END_TEST
 
+START_TEST(test_dispatch_reads_until_end_of_file)
+{
+    const unsigned char *frames[3] = { frame_eth_udp_sip, frame_eth_arp, frame_eth_icmp };
+    size_t lens[3] = { sizeof frame_eth_udp_sip, sizeof frame_eth_arp,
+                       sizeof frame_eth_icmp };
+    char path[128], err[PCAP_ERRBUF_SIZE + 64];
+    struct bw_capture cap;
+    struct seen s;
+    int rc, n, total = 0, calls = 0;
+
+    temp_path(path, sizeof path, "dispatch");
+    write_pcap(path, DLT_EN10MB, frames, lens, 3);
+
+    /* ck_assert_int_eq evaluates its arguments twice */
+    rc = bw_capture_open_offline(&cap, path, err, sizeof err);
+    ck_assert_int_eq(rc, 0);
+    memset(&s, 0, sizeof s);
+    while ((n = bw_capture_dispatch(&cap, record, (u_char *)&s)) > 0 && calls < 10) {
+        total += n;
+        calls++;
+    }
+    bw_capture_close(&cap);
+    unlink(path);
+
+    ck_assert_int_eq(n, 0);
+    ck_assert_int_eq(total, 3);
+    ck_assert_int_eq(s.count, 3);
+    ck_assert_int_eq(s.dlt, DLT_EN10MB);
+}
+END_TEST
+
+START_TEST(test_dispatch_after_break)
+{
+    const unsigned char *frames[2] = { frame_eth_udp_sip, frame_eth_arp };
+    size_t lens[2] = { sizeof frame_eth_udp_sip, sizeof frame_eth_arp };
+    char path[128], err[PCAP_ERRBUF_SIZE + 64];
+    struct bw_capture cap;
+    struct seen s;
+    int rc, n;
+
+    temp_path(path, sizeof path, "break");
+    write_pcap(path, DLT_EN10MB, frames, lens, 2);
+
+    /* ck_assert_int_eq evaluates its arguments twice */
+    rc = bw_capture_open_offline(&cap, path, err, sizeof err);
+    ck_assert_int_eq(rc, 0);
+    memset(&s, 0, sizeof s);
+    bw_capture_break(&cap);
+    n = bw_capture_dispatch(&cap, record, (u_char *)&s);
+    ck_assert_int_eq(n, BW_CAPTURE_BROKEN);
+    ck_assert_int_eq(s.count, 0);
+    /* The request is consumed: the next call reads the frames. */
+    n = bw_capture_dispatch(&cap, record, (u_char *)&s);
+    bw_capture_close(&cap);
+    unlink(path);
+    ck_assert_int_eq(n, 2);
+    ck_assert_int_eq(s.count, 2);
+}
+END_TEST
+
 START_TEST(test_live_unknown_interface)
 {
     char err[PCAP_ERRBUF_SIZE + 64];
@@ -224,6 +284,8 @@ Suite *capture_suite(void)
     tcase_add_test(tc, test_offline_unsupported_link_type);
     tcase_add_test(tc, test_offline_missing_file);
     tcase_add_test(tc, test_offline_not_a_pcap);
+    tcase_add_test(tc, test_dispatch_reads_until_end_of_file);
+    tcase_add_test(tc, test_dispatch_after_break);
     tcase_add_test(tc, test_live_unknown_interface);
     suite_add_tcase(s, tc);
     return s;

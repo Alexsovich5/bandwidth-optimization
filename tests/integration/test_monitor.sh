@@ -1,14 +1,20 @@
 #!/bin/bash
 # Offline monitor runs over the generated mixed.pcap, checked through
-# sqlite3 and the report command. Run from the repository root after
-# `make fixtures`.
+# sqlite3 and the report command, then live runs on the dummy interface
+# bw0 (needs NET_ADMIN). Run from the repository root after `make fixtures`.
 set -e
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+. tests/integration/lib.sh
 
 OUT=tests/fixtures/out
 DB=/tmp/bwopt_monitor.$$.db
-trap 'rm -f "$DB"' EXIT
+TMP=$(mktemp -d /tmp/bwopt_monitor.XXXXXX)
+cleanup() {
+    [ -n "$LIVE_PID" ] && kill "$LIVE_PID" 2> /dev/null || true
+    bw0_remove
+    rm -rf "$DB" "$TMP"
+}
+trap cleanup EXIT
 
 [ -s "$OUT/mixed.pcap" ] || fail "$OUT/mixed.pcap missing; run make fixtures"
 rm -f "$DB"
@@ -86,7 +92,9 @@ rc=0
 
 # Usage errors.
 for args in "monitor" "monitor -r $OUT/mixed.pcap --interval 0" \
-            "monitor -r $OUT/mixed.pcap --interval x" "report" "report --db $DB --since x"; do
+            "monitor -r $OUT/mixed.pcap --interval x" "report" "report --db $DB --since x" \
+            "monitor -i lo -r $OUT/mixed.pcap" "monitor -i lo --duration 0" \
+            "monitor -i lo --duration x"; do
     rc=0
     ./bwopt $args > /dev/null 2>&1 || rc=$?
     [ "$rc" -eq 2 ] || fail "'$args' exited $rc, expected 2"
@@ -96,5 +104,92 @@ done
 rc=0
 ./bwopt monitor -r /nonexistent.pcap --db "$DB" > /dev/null 2>&1 || rc=$?
 [ "$rc" -eq 1 ] || fail "missing pcap exited $rc, expected 1"
+
+# --- live --------------------------------------------------------------
+
+# An interface that does not exist, or a log file that cannot be opened, exits 1.
+rc=0
+err=$(./bwopt monitor -i nosuch0 --duration 1 --db "$TMP/e.db" --log "$TMP/e.log" 2>&1 >/dev/null) \
+    || rc=$?
+[ "$rc" -eq 1 ] || fail "unknown interface exited $rc, expected 1"
+echo "$err" | grep -q nosuch0 || fail "unknown interface error: $err"
+rc=0
+err=$(./bwopt monitor -i lo --duration 1 --db "$TMP/e.db" --log /nonexistent/dir/l.log 2>&1 >/dev/null) \
+    || rc=$?
+[ "$rc" -eq 1 ] || fail "unopenable log exited $rc, expected 1"
+echo "$err" | grep -q '/nonexistent/dir/l.log' || fail "unopenable log error: $err"
+
+if ! bw0_create; then
+    echo "test_monitor: live part SKIP (ip link add bw0 type dummy is not permitted here)"
+    echo "test_monitor: ok"
+    exit 0
+fi
+
+# sums CLASS: "packets bytes" stored for CLASS on bw0 in database $1.
+sums() {
+    sqlite3 -separator ' ' "$1" \
+        "SELECT COALESCE(SUM(packets),0), COALESCE(SUM(bytes),0) FROM samples
+         WHERE iface = 'bw0' AND class = '$2'"
+}
+
+# --duration: 20 one-byte datagrams to 5060 (43-byte frames) land in
+# high_priority, and the log has a start line, flush lines and a stop line.
+LDB=$TMP/l.db
+LLOG=$TMP/l.log
+start=$(date +%s)
+./bwopt monitor -i bw0 --interval 1 --duration 3 --db "$LDB" --log "$LLOG" > "$TMP/l.out" 2>&1 &
+LIVE_PID=$!
+sleep 1
+send_udp 5060 20
+rc=0
+wait "$LIVE_PID" || rc=$?
+LIVE_PID=
+end=$(date +%s)
+[ "$rc" -eq 0 ] || { cat "$TMP/l.out"; fail "live monitor exited $rc"; }
+elapsed=$((end - start))
+[ "$elapsed" -ge 2 ] && [ "$elapsed" -le 5 ] || fail "--duration 3 ran for ${elapsed}s"
+[ "$(sums "$LDB" high_priority)" = "20 860" ] \
+    || fail "high_priority on bw0: $(sums "$LDB" high_priority), expected 20 860"
+[ "$(sums "$LDB" medium_priority)" = "0 0" ] || fail "medium_priority got traffic"
+flushes=$(sqlite3 "$LDB" "SELECT COUNT(DISTINCT ts) FROM samples WHERE iface = 'bw0'")
+[ "$flushes" -ge 2 ] || fail "expected at least 2 wall-clock flushes, got $flushes"
+grep -q 'monitor started on bw0' "$LLOG" || { cat "$LLOG"; fail "no start line in the log"; }
+grep -q 'monitor stopped' "$LLOG" || { cat "$LLOG"; fail "no stop line in the log"; }
+n=$(grep -c ' flush ' "$LLOG")
+[ "$n" -eq "$flushes" ] || { cat "$LLOG"; fail "$n flush lines for $flushes flushes"; }
+
+# The log is appended to, not truncated.
+./bwopt monitor -i bw0 --duration 1 --db "$TMP/a.db" --log "$LLOG" > /dev/null \
+    || fail "second live run failed"
+n=$(grep -c 'monitor started on bw0' "$LLOG")
+[ "$n" -eq 2 ] || fail "log has $n start lines after two runs, expected 2"
+
+# SIGTERM with a 30 s interval: only the final flush can write the rows.
+TDB=$TMP/t.db
+./bwopt monitor -i bw0 --interval 30 --db "$TDB" --log "$TMP/t.log" > "$TMP/t.out" 2>&1 &
+LIVE_PID=$!
+sleep 1
+send_udp 443 5
+sleep 0.5
+kill -TERM "$LIVE_PID"
+rc=0
+wait "$LIVE_PID" || rc=$?
+LIVE_PID=
+[ "$rc" -eq 0 ] || { cat "$TMP/t.out"; fail "SIGTERM run exited $rc, expected 0"; }
+[ "$(sums "$TDB" medium_priority)" = "5 215" ] \
+    || fail "medium_priority after SIGTERM: $(sums "$TDB" medium_priority), expected 5 215"
+grep -q 'monitor stopped' "$TMP/t.log" || fail "no stop line after SIGTERM"
+
+# SIGINT stops it the same way.
+./bwopt monitor -i bw0 --interval 30 --db "$TMP/i.db" --log "$TMP/i.log" > /dev/null 2>&1 &
+LIVE_PID=$!
+sleep 1
+kill -INT "$LIVE_PID"
+rc=0
+wait "$LIVE_PID" || rc=$?
+LIVE_PID=
+[ "$rc" -eq 0 ] || fail "SIGINT run exited $rc, expected 0"
+rows=$(sqlite3 "$TMP/i.db" 'SELECT COUNT(*) FROM samples')
+[ "$rows" -eq 5 ] || fail "SIGINT run wrote $rows rows, expected 5"
 
 echo "test_monitor: ok"

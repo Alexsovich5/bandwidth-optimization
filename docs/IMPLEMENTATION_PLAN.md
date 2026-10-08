@@ -421,8 +421,10 @@ Common conventions:
   - stop cleanly on SIGINT/SIGTERM or when `--duration` runs out (`pcap_breakloop`), with a
     final flush, reusing the existing `signal_handler`/`running` pattern in `src/main.c`
   - append log lines (start, each flush, stop) to `log_file`, overridable with `--log`
-- **Files**: modify `src/main.c`, `src/capture.c` (breakloop) and
-  `tests/integration/test_monitor.sh`.
+- **Files**: modify `src/main.c`, `src/capture.c` (breakloop, plus `bw_capture_dispatch()`:
+  `pcap_loop` does not return on a live read timeout, so the live loop calls `pcap_dispatch`
+  and checks the wall clock, the signal flag and `--duration` after every read),
+  `tests/test_capture.c` and `tests/integration/test_monitor.sh`.
 - **Tests first** (`test_monitor.sh`, live part, using `lib.sh`):
   - with bw0 up, `monitor -i bw0 --interval 1 --duration 3 --db /tmp/l.db --log /tmp/l.log &`
     runs while `send_udp 5060 20`, after which `sqlite3` shows `high_priority` bytes > 0 and

@@ -43,7 +43,22 @@ int bw_capture_datalink(const struct bw_capture *cap);
 int bw_capture_loop(struct bw_capture *cap, int count,
                     bw_capture_handler handler, u_char *user);
 
-/* Makes a running loop return; safe to call from a signal handler. */
+/* bw_capture_dispatch() result after bw_capture_break() */
+#define BW_CAPTURE_BROKEN -2
+
+/*
+ * Delivers the frames of one read to handler: on a live capture, what
+ * arrived before the read timeout (possibly none), on a file, one buffer.
+ * Returns the number of frames delivered (0 at the end of a file or when
+ * the timeout passed without traffic), -1 on a read error, or
+ * BW_CAPTURE_BROKEN when bw_capture_break() was called first.
+ */
+int bw_capture_dispatch(struct bw_capture *cap, bw_capture_handler handler, u_char *user);
+
+/*
+ * Makes a running loop or the next dispatch return; safe to call from a
+ * signal handler.
+ */
 void bw_capture_break(struct bw_capture *cap);
 
 const char *bw_capture_error(const struct bw_capture *cap);
