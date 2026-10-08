@@ -347,8 +347,10 @@ always pass `--db` and `--log` under `/tmp`.
 ```
 
 `<proto>` is `tcp`, `udp` or `ip/<num>`. Ports are omitted (`<src> -> <dst>`) for non-first
-fragments and other protocols. `classify --summary` prints `class packets bytes` rows in config
-order, followed by an `unclassified` row.
+fragments and other protocols. Frames too short or malformed to decode are counted and printed
+like non-IPv4 frames. `classify --summary` prints a `class packets bytes` header, then one row
+per class in config order, followed by an `unclassified` row (`tests/expected/mixed.summary`).
+`-r` has the long form `--read`.
 
 ## Stack & pinned versions
 
@@ -472,7 +474,9 @@ must state all of this.
     configured rates, idempotence of a second run on the same samples
   - exec: dry-run output, strict mode stops at the first failure, ignore-errors mode continues
 - **Fixture generator**: `tests/gen_pcap.c` writes deterministic pcaps (`mixed.pcap` with
-  SIP/RTP/SSH/HTTPS/HTTP/FTP/unknown flows, `vlan.pcap`, `nonip.pcap`) into `tests/fixtures/out/`
+  SIP/RTP/SSH/HTTPS/HTTP/FTP/unknown flows, an HTTP request on port 8080, ICMP, a non-first
+  UDP fragment, ARP and IPv6; `vlan.pcap`, the same frames tagged with VLAN 100; `nonip.pcap`
+  with ARP, IPv6 and LLDP) into `tests/fixtures/out/`
   at test time, so no binary fixtures are committed.
 - **Integration tests** (`tests/integration/*.sh`, bash scripts run with `bash -e` because
   wheezy's `/bin/sh` is dash, which has no `/dev/udp`; `make integration`; need NET_ADMIN from

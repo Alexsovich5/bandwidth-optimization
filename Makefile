@@ -18,6 +18,10 @@ TEST_SRCS   = $(wildcard tests/test_*.c) tests/run_tests.c
 TEST_RUNNER = tests/run_tests
 INTEGRATION = $(wildcard tests/integration/test_*.sh)
 
+GEN_PCAP     = tests/gen_pcap
+FIXTURE_DIR  = tests/fixtures/out
+FIXTURES     = $(FIXTURE_DIR)/.stamp
+
 all: $(TARGET)
 
 $(LIB): $(LIB_OBJS)
@@ -33,6 +37,16 @@ $(SRCDIR)/%.o: $(SRCDIR)/%.c $(wildcard $(SRCDIR)/*.h)
 $(TEST_RUNNER): $(TEST_SRCS) $(wildcard tests/*.h) $(LIB)
 	$(CC) $(CFLAGS) $(CHECK_CFLAGS) -o $@ $(TEST_SRCS) $(LIB) $(CHECK_LIBS) $(LDLIBS)
 
+$(GEN_PCAP): tests/gen_pcap.c
+	$(CC) $(CFLAGS) -o $@ $< -lpcap
+
+$(FIXTURES): $(GEN_PCAP)
+	mkdir -p $(FIXTURE_DIR)
+	./$(GEN_PCAP) $(FIXTURE_DIR)
+	touch $@
+
+fixtures: $(FIXTURES)
+
 unit: $(TEST_RUNNER)
 	./$(TEST_RUNNER)
 
@@ -42,7 +56,7 @@ integration: $(TARGET)
 		bash -e $$t; \
 	done
 
-test: unit integration
+test: fixtures unit integration
 
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
@@ -51,6 +65,7 @@ install: $(TARGET)
 	install -m 0644 config/policies.conf $(DESTDIR)/etc/bandwidth_optimizer/policies.conf
 
 clean:
-	rm -f $(SRCDIR)/*.o $(LIB) $(TARGET) $(TEST_RUNNER)
+	rm -f $(SRCDIR)/*.o $(LIB) $(TARGET) $(TEST_RUNNER) $(GEN_PCAP)
+	rm -rf $(FIXTURE_DIR)
 
-.PHONY: all unit integration test install clean
+.PHONY: all fixtures unit integration test install clean

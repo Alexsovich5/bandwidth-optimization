@@ -1,0 +1,6 @@
+class             packets      bytes
+high_priority           5        776
+medium_priority         4        386
+low_priority            3        232
+best_effort             5        538
+unclassified            2        104

@@ -11,10 +11,17 @@
 #include <unistd.h>
 #include <signal.h>
 
+#include "capture.h"
+#include "classifier.h"
 #include "config.h"
+#include "packet.h"
 #include "version.h"
 
-#define EXIT_USAGE 2
+#define EXIT_RUNTIME 1
+#define EXIT_USAGE   2
+
+#define PROTO_TCP      6
+#define PROTO_UDP      17
 
 static volatile sig_atomic_t running = 1;
 
@@ -32,10 +39,13 @@ static void usage(FILE *out)
             "\n"
             "Commands:\n"
             "  check-config           validate the policy file and print its classes\n"
+            "  classify -r FILE       classify every frame of a pcap file\n"
             "\n"
             "Options:\n"
             "  -c, --config FILE      policy file (default config/policies.conf)\n"
             "  -i, --interface IFACE  network interface (default eth0)\n"
+            "  -r, --read FILE        pcap file to read\n"
+            "  --summary              print packets and bytes per class instead\n"
             "  --version              print the version and exit\n"
             "  --help                 print this help and exit\n");
 }
@@ -103,11 +113,131 @@ static int cmd_check_config(const char *config_file)
     return 0;
 }
 
+struct classify_state {
+    const struct bw_config *cfg;
+    int summary;
+    unsigned long index;
+    uint64_t packets[BW_MAX_CLASSES + 1];  /* last slot: unclassified */
+    uint64_t bytes[BW_MAX_CLASSES + 1];
+};
+
+static void format_addr(uint32_t a, char *buf, size_t len)
+{
+    snprintf(buf, len, "%u.%u.%u.%u", (unsigned)(a >> 24) & 0xff,
+             (unsigned)(a >> 16) & 0xff, (unsigned)(a >> 8) & 0xff, (unsigned)a & 0xff);
+}
+
+/* True for a TCP/UDP packet whose ports were decoded (first fragment). */
+static int has_ports(const u_char *frame, const struct bw_packet *pkt)
+{
+    const u_char *ip = frame + pkt->ip_off;
+
+    if (pkt->ip_proto != PROTO_TCP && pkt->ip_proto != PROTO_UDP)
+        return 0;
+    return (((ip[6] << 8) | ip[7]) & 0x1fff) == 0;
+}
+
+/*
+ * Prints one classify line. Frames that were not classified (non-IPv4, or
+ * too short or malformed to decode) are shown by ethertype only.
+ */
+static void print_packet(unsigned long n, const u_char *frame, const struct bw_packet *pkt,
+                         const char *class_name, int classified)
+{
+    char src[16], dst[16], proto[16];
+
+    if (!classified) {
+        printf("%lu ethertype=0x%04x len=%lu class=%s\n", n, (unsigned)pkt->ethertype,
+               (unsigned long)pkt->wire_len, class_name);
+        return;
+    }
+    format_addr(pkt->src, src, sizeof src);
+    format_addr(pkt->dst, dst, sizeof dst);
+    if (pkt->ip_proto == PROTO_TCP)
+        snprintf(proto, sizeof proto, "tcp");
+    else if (pkt->ip_proto == PROTO_UDP)
+        snprintf(proto, sizeof proto, "udp");
+    else
+        snprintf(proto, sizeof proto, "ip/%u", (unsigned)pkt->ip_proto);
+
+    if (has_ports(frame, pkt))
+        printf("%lu %s %s:%u -> %s:%u len=%lu dscp=%u class=%s\n", n, proto,
+               src, (unsigned)pkt->sport, dst, (unsigned)pkt->dport,
+               (unsigned long)pkt->wire_len, (unsigned)pkt->dscp, class_name);
+    else
+        printf("%lu %s %s -> %s len=%lu dscp=%u class=%s\n", n, proto, src, dst,
+               (unsigned long)pkt->wire_len, (unsigned)pkt->dscp, class_name);
+}
+
+static void classify_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
+                           const u_char *bytes)
+{
+    struct classify_state *st = (struct classify_state *)user;
+    struct bw_packet pkt;
+    int idx = -1, slot;
+
+    st->index++;
+    /* A frame that fails to decode is counted as unclassified. */
+    if (bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) == 0)
+        idx = bw_classify(st->cfg, &pkt);
+
+    slot = idx >= 0 ? idx : BW_MAX_CLASSES;
+    st->packets[slot]++;
+    st->bytes[slot] += hdr->len;
+
+    if (!st->summary)
+        print_packet(st->index, bytes, &pkt,
+                     idx >= 0 ? st->cfg->classes[idx].name : "unclassified", idx >= 0);
+}
+
+static int cmd_classify(const char *config_file, const char *pcap_file, int summary)
+{
+    struct bw_config cfg;
+    struct bw_capture cap;
+    struct classify_state st;
+    char err[PCAP_ERRBUF_SIZE + 64];
+    int i;
+
+    if (pcap_file == NULL) {
+        fprintf(stderr, "bwopt: classify needs -r FILE\n");
+        usage(stderr);
+        return EXIT_USAGE;
+    }
+    if (load_config(config_file, &cfg) != 0)
+        return EXIT_USAGE;
+    if (bw_capture_open_offline(&cap, pcap_file, err, sizeof err) != 0) {
+        fprintf(stderr, "bwopt: %s\n", err);
+        return EXIT_RUNTIME;
+    }
+
+    memset(&st, 0, sizeof st);
+    st.cfg = &cfg;
+    st.summary = summary;
+    if (bw_capture_loop(&cap, -1, classify_frame, (u_char *)&st) < 0) {
+        fprintf(stderr, "bwopt: %s: %s\n", pcap_file, bw_capture_error(&cap));
+        bw_capture_close(&cap);
+        return EXIT_RUNTIME;
+    }
+    bw_capture_close(&cap);
+
+    if (summary) {
+        printf("%-16s %8s %10s\n", "class", "packets", "bytes");
+        for (i = 0; i < cfg.nclasses; i++)
+            printf("%-16s %8" PRIu64 " %10" PRIu64 "\n", cfg.classes[i].name,
+                   st.packets[i], st.bytes[i]);
+        printf("%-16s %8" PRIu64 " %10" PRIu64 "\n", "unclassified",
+               st.packets[BW_MAX_CLASSES], st.bytes[BW_MAX_CLASSES]);
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     const char *interface = "eth0";
     const char *config_file = "config/policies.conf";
     const char *command = NULL;
+    const char *read_file = NULL;
+    int summary = 0;
     int i;
 
     for (i = 1; i < argc; i++) {
@@ -123,6 +253,11 @@ int main(int argc, char *argv[])
         } else if ((strcmp(argv[i], "--config") == 0 || strcmp(argv[i], "-c") == 0)
                    && i + 1 < argc) {
             config_file = argv[++i];
+        } else if ((strcmp(argv[i], "--read") == 0 || strcmp(argv[i], "-r") == 0)
+                   && i + 1 < argc) {
+            read_file = argv[++i];
+        } else if (strcmp(argv[i], "--summary") == 0) {
+            summary = 1;
         } else if (argv[i][0] != '-' && command == NULL) {
             command = argv[i];
         } else {
@@ -142,6 +277,8 @@ int main(int argc, char *argv[])
 
     if (strcmp(command, "check-config") == 0)
         return cmd_check_config(config_file);
+    if (strcmp(command, "classify") == 0)
+        return cmd_classify(config_file, read_file, summary);
 
     (void)interface;
     fprintf(stderr, "bwopt: unknown command '%s'\n", command);
