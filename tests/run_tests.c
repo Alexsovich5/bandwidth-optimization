@@ -3,6 +3,7 @@
 
 Suite *version_suite(void);
 Suite *config_suite(void);
+Suite *packet_suite(void);
 
 int main(void)
 {
@@ -11,6 +12,7 @@ int main(void)
 
     sr = srunner_create(version_suite());
     srunner_add_suite(sr, config_suite());
+    srunner_add_suite(sr, packet_suite());
 
     srunner_run_all(sr, CK_NORMAL);
     failed = srunner_ntests_failed(sr);
