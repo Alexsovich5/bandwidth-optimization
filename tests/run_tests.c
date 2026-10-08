@@ -11,6 +11,7 @@ Suite *dscp_suite(void);
 Suite *qos_suite(void);
 Suite *exec_suite(void);
 Suite *monitor_suite(void);
+Suite *store_suite(void);
 
 int main(void)
 {
@@ -27,6 +28,7 @@ int main(void)
     srunner_add_suite(sr, qos_suite());
     srunner_add_suite(sr, exec_suite());
     srunner_add_suite(sr, monitor_suite());
+    srunner_add_suite(sr, store_suite());
 
     srunner_run_all(sr, CK_NORMAL);
     failed = srunner_ntests_failed(sr);
