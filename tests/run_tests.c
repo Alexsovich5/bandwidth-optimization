@@ -8,6 +8,7 @@ Suite *signatures_suite(void);
 Suite *classifier_suite(void);
 Suite *capture_suite(void);
 Suite *dscp_suite(void);
+Suite *qos_suite(void);
 
 int main(void)
 {
@@ -21,6 +22,7 @@ int main(void)
     srunner_add_suite(sr, classifier_suite());
     srunner_add_suite(sr, capture_suite());
     srunner_add_suite(sr, dscp_suite());
+    srunner_add_suite(sr, qos_suite());
 
     srunner_run_all(sr, CK_NORMAL);
     failed = srunner_ntests_failed(sr);

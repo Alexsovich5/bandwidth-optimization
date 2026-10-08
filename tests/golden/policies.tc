@@ -1,0 +1,13 @@
+tc qdisc add dev eth0 root handle 1: htb default 40
+tc class add dev eth0 parent 1: classid 1:1 htb rate 100000000bit
+tc class add dev eth0 parent 1:1 classid 1:10 htb rate 30000000bit ceil 100000000bit burst 32k prio 0
+tc class add dev eth0 parent 1:1 classid 1:20 htb rate 40000000bit ceil 100000000bit burst 64k prio 1
+tc class add dev eth0 parent 1:1 classid 1:30 htb rate 20000000bit ceil 100000000bit burst 128k prio 2
+tc class add dev eth0 parent 1:1 classid 1:40 htb rate 10000000bit ceil 100000000bit burst 256k prio 3
+tc qdisc add dev eth0 parent 1:10 handle 10: sfq perturb 10
+tc qdisc add dev eth0 parent 1:20 handle 20: sfq perturb 10
+tc qdisc add dev eth0 parent 1:30 handle 30: sfq perturb 10
+tc qdisc add dev eth0 parent 1:40 handle 40: sfq perturb 10
+tc filter add dev eth0 parent 1: protocol ip prio 1 u32 match ip dsfield 0xb8 0xfc flowid 1:10
+tc filter add dev eth0 parent 1: protocol ip prio 1 u32 match ip dsfield 0x88 0xfc flowid 1:20
+tc filter add dev eth0 parent 1: protocol ip prio 1 u32 match ip dsfield 0x48 0xfc flowid 1:30

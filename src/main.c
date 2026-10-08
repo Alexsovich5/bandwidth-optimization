@@ -16,6 +16,7 @@
 #include "config.h"
 #include "dscp.h"
 #include "packet.h"
+#include "qos.h"
 #include "version.h"
 
 #define EXIT_RUNTIME 1
@@ -44,6 +45,7 @@ static void usage(FILE *out)
             "  mark -r IN -w OUT      testing aid: rewrite the DSCP of IPv4 packets in a\n"
             "                         pcap file according to their class\n"
             "  dscp-script            print the iptables DSCP marking rules\n"
+            "  tc-script              print the tc commands for the HTB shaping tree\n"
             "\n"
             "Options:\n"
             "  -c, --config FILE      policy file (default config/policies.conf)\n"
@@ -339,6 +341,19 @@ static int cmd_dscp_script(const char *config_file, const char *iface)
     return 0;
 }
 
+static int cmd_tc_script(const char *config_file, const char *iface)
+{
+    struct bw_config cfg;
+
+    if (load_config(config_file, &cfg) != 0)
+        return EXIT_USAGE;
+    if (bw_qos_script(&cfg, iface, stdout) != 0 || fflush(stdout) != 0) {
+        fprintf(stderr, "bwopt: write error\n");
+        return EXIT_RUNTIME;
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     const char *interface = NULL;   /* NULL: interface= from the policy */
@@ -395,6 +410,8 @@ int main(int argc, char *argv[])
         return cmd_mark(config_file, read_file, write_file);
     if (strcmp(command, "dscp-script") == 0)
         return cmd_dscp_script(config_file, interface);
+    if (strcmp(command, "tc-script") == 0)
+        return cmd_tc_script(config_file, interface);
 
     fprintf(stderr, "bwopt: unknown command '%s'\n", command);
     usage(stderr);

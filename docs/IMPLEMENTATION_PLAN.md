@@ -263,7 +263,9 @@ Common conventions:
     for non-default classes
   - `bw_qos_clear_script()` emits `tc qdisc del dev IFACE root`
   - add `bwopt tc-script [-i|--interface IFACE]`
-- **Files**: create `src/qos.c`, `src/qos.h`, `tests/test_qos.c`, `tests/golden/policies.tc`.
+- **Files**: create `src/qos.c`, `src/qos.h`, `tests/test_qos.c`, `tests/golden/policies.tc`,
+  `tests/integration/test_tc_script.sh` (CLI `-i`/`--interface` check), and the fixtures
+  `tests/fixtures/conf/one_class.conf` and `tests/fixtures/conf/under_100.conf`.
   Modify `src/main.c` and `tests/run_tests.c`.
 - **Tests first**:
   - the shipped config script equals `tests/golden/policies.tc` (matches the example in
