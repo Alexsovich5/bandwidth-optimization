@@ -1,0 +1,7 @@
+*.o
+*.a
+bwopt
+tests/run_tests
+tests/gen_pcap
+tests/fixtures/out/
+*.db

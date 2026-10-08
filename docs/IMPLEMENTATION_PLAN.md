@@ -45,8 +45,10 @@ Common conventions:
     - the same `RUN` then runs `gcc --version && valgrind --version && iptables -V && git
       --version` as a build-time smoke check
     - `WORKDIR /src`
-  - create `docker-compose.yml`: service `bwopt` builds `.`, mounts the repo at `/src`, sets
-    `cap_add: [NET_ADMIN]`, and uses `command: make test`
+  - create `docker-compose.yml`: top-level `name: bandwidth-optimization`; service `bwopt`
+    builds `.` as image `bandwidth-optimization:dev`, mounts the repo at `/src`, sets
+    `cap_add: [NET_ADMIN]`, and uses `command: make test`; the default network is pinned to
+    subnet `172.43.0.0/24` (no host ports are published)
   - create `.gitignore`: `*.o`, `*.a`, `bwopt`, `tests/run_tests`, `tests/gen_pcap`,
     `tests/fixtures/out/`, `*.db`
   - create `src/version.h`: `#define BWOPT_VERSION "0.1.0"`
