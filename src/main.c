@@ -14,6 +14,7 @@
 #include "capture.h"
 #include "classifier.h"
 #include "config.h"
+#include "dscp.h"
 #include "packet.h"
 #include "version.h"
 
@@ -40,11 +41,15 @@ static void usage(FILE *out)
             "Commands:\n"
             "  check-config           validate the policy file and print its classes\n"
             "  classify -r FILE       classify every frame of a pcap file\n"
+            "  mark -r IN -w OUT      testing aid: rewrite the DSCP of IPv4 packets in a\n"
+            "                         pcap file according to their class\n"
+            "  dscp-script            print the iptables DSCP marking rules\n"
             "\n"
             "Options:\n"
             "  -c, --config FILE      policy file (default config/policies.conf)\n"
-            "  -i, --interface IFACE  network interface (default eth0)\n"
+            "  -i, --interface IFACE  network interface (default: interface= in the policy)\n"
             "  -r, --read FILE        pcap file to read\n"
+            "  -w, --write FILE       pcap file to write\n"
             "  --summary              print packets and bytes per class instead\n"
             "  --version              print the version and exit\n"
             "  --help                 print this help and exit\n");
@@ -231,12 +236,116 @@ static int cmd_classify(const char *config_file, const char *pcap_file, int summ
     return 0;
 }
 
+struct mark_state {
+    const struct bw_config *cfg;
+    pcap_dumper_t *dumper;
+    u_char *buf;
+    size_t buflen;
+    unsigned long packets, marked;
+    int nomem;
+};
+
+static void mark_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
+                       const u_char *bytes)
+{
+    struct mark_state *st = (struct mark_state *)user;
+    struct bw_packet pkt;
+    int idx;
+
+    st->packets++;
+    if (bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) != 0
+        || (idx = bw_classify(st->cfg, &pkt)) < 0) {
+        pcap_dump((u_char *)st->dumper, hdr, bytes);
+        return;
+    }
+
+    if (hdr->caplen > st->buflen) {
+        u_char *nb = realloc(st->buf, hdr->caplen);
+
+        if (nb == NULL) {
+            st->nomem = 1;
+            pcap_dump((u_char *)st->dumper, hdr, bytes);
+            return;
+        }
+        st->buf = nb;
+        st->buflen = hdr->caplen;
+    }
+    memcpy(st->buf, bytes, hdr->caplen);
+    if (bw_dscp_rewrite(st->buf + pkt.ip_off, hdr->caplen - pkt.ip_off,
+                        (uint8_t)st->cfg->classes[idx].dscp) == 0)
+        st->marked++;
+    pcap_dump((u_char *)st->dumper, hdr, st->buf);
+}
+
+static int cmd_mark(const char *config_file, const char *in_file, const char *out_file)
+{
+    struct bw_config cfg;
+    struct bw_capture cap;
+    struct mark_state st;
+    char err[PCAP_ERRBUF_SIZE + 64];
+    int rc = 0;
+
+    if (in_file == NULL || out_file == NULL) {
+        fprintf(stderr, "bwopt: mark needs -r IN.pcap and -w OUT.pcap\n");
+        usage(stderr);
+        return EXIT_USAGE;
+    }
+    if (load_config(config_file, &cfg) != 0)
+        return EXIT_USAGE;
+    if (bw_capture_open_offline(&cap, in_file, err, sizeof err) != 0) {
+        fprintf(stderr, "bwopt: %s\n", err);
+        return EXIT_RUNTIME;
+    }
+
+    memset(&st, 0, sizeof st);
+    st.cfg = &cfg;
+    st.dumper = pcap_dump_open(cap.pcap, out_file);
+    if (st.dumper == NULL) {
+        fprintf(stderr, "bwopt: %s\n", pcap_geterr(cap.pcap));
+        bw_capture_close(&cap);
+        return EXIT_RUNTIME;
+    }
+
+    if (bw_capture_loop(&cap, -1, mark_frame, (u_char *)&st) < 0) {
+        fprintf(stderr, "bwopt: %s: %s\n", in_file, bw_capture_error(&cap));
+        rc = EXIT_RUNTIME;
+    } else if (st.nomem) {
+        fprintf(stderr, "bwopt: out of memory\n");
+        rc = EXIT_RUNTIME;
+    }
+    if (pcap_dump_flush(st.dumper) != 0) {
+        fprintf(stderr, "bwopt: %s: write error\n", out_file);
+        rc = EXIT_RUNTIME;
+    }
+    pcap_dump_close(st.dumper);
+    bw_capture_close(&cap);
+    free(st.buf);
+
+    if (rc == 0)
+        printf("marked %lu of %lu packets, wrote %s\n", st.marked, st.packets, out_file);
+    return rc;
+}
+
+static int cmd_dscp_script(const char *config_file, const char *iface)
+{
+    struct bw_config cfg;
+
+    if (load_config(config_file, &cfg) != 0)
+        return EXIT_USAGE;
+    if (bw_dscp_script(&cfg, iface, stdout) != 0 || fflush(stdout) != 0) {
+        fprintf(stderr, "bwopt: write error\n");
+        return EXIT_RUNTIME;
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
-    const char *interface = "eth0";
+    const char *interface = NULL;   /* NULL: interface= from the policy */
     const char *config_file = "config/policies.conf";
     const char *command = NULL;
     const char *read_file = NULL;
+    const char *write_file = NULL;
     int summary = 0;
     int i;
 
@@ -256,6 +365,9 @@ int main(int argc, char *argv[])
         } else if ((strcmp(argv[i], "--read") == 0 || strcmp(argv[i], "-r") == 0)
                    && i + 1 < argc) {
             read_file = argv[++i];
+        } else if ((strcmp(argv[i], "--write") == 0 || strcmp(argv[i], "-w") == 0)
+                   && i + 1 < argc) {
+            write_file = argv[++i];
         } else if (strcmp(argv[i], "--summary") == 0) {
             summary = 1;
         } else if (argv[i][0] != '-' && command == NULL) {
@@ -279,8 +391,11 @@ int main(int argc, char *argv[])
         return cmd_check_config(config_file);
     if (strcmp(command, "classify") == 0)
         return cmd_classify(config_file, read_file, summary);
+    if (strcmp(command, "mark") == 0)
+        return cmd_mark(config_file, read_file, write_file);
+    if (strcmp(command, "dscp-script") == 0)
+        return cmd_dscp_script(config_file, interface);
 
-    (void)interface;
     fprintf(stderr, "bwopt: unknown command '%s'\n", command);
     usage(stderr);
     return EXIT_USAGE;

@@ -1,0 +1,34 @@
+iptables -t mangle -N BWOPT
+iptables -t mangle -A POSTROUTING -o eth0 -j BWOPT
+iptables -t mangle -A BWOPT -p tcp --dport 5060 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p tcp --sport 5060 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p udp --dport 5060 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p udp --sport 5060 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p tcp --dport 10000:20000 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p tcp --sport 10000:20000 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p udp --dport 10000:20000 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p udp --sport 10000:20000 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p tcp --dport 1720 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p tcp --sport 1720 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p udp --dport 1720 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p udp --sport 1720 -j DSCP --set-dscp 46
+iptables -t mangle -A BWOPT -p tcp --dport 22 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p tcp --sport 22 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p udp --dport 22 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p udp --sport 22 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p tcp --dport 443 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p tcp --sport 443 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p udp --dport 443 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p udp --sport 443 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p tcp --dport 25 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p tcp --sport 25 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p udp --dport 25 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p udp --sport 25 -j DSCP --set-dscp 34
+iptables -t mangle -A BWOPT -p tcp --dport 80 -j DSCP --set-dscp 18
+iptables -t mangle -A BWOPT -p tcp --sport 80 -j DSCP --set-dscp 18
+iptables -t mangle -A BWOPT -p udp --dport 80 -j DSCP --set-dscp 18
+iptables -t mangle -A BWOPT -p udp --sport 80 -j DSCP --set-dscp 18
+iptables -t mangle -A BWOPT -p tcp --dport 21 -j DSCP --set-dscp 18
+iptables -t mangle -A BWOPT -p tcp --sport 21 -j DSCP --set-dscp 18
+iptables -t mangle -A BWOPT -p udp --dport 21 -j DSCP --set-dscp 18
+iptables -t mangle -A BWOPT -p udp --sport 21 -j DSCP --set-dscp 18
