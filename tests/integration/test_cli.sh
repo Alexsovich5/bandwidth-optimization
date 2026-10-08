@@ -19,4 +19,33 @@ rc=0
 ./bwopt no-such-command > /dev/null 2>&1 || rc=$?
 [ "$rc" -eq 2 ] || fail "unknown subcommand exited $rc, expected 2"
 
+# check-config: the shipped file is valid and the class table is printed.
+out=$(./bwopt check-config -c config/policies.conf) || fail "check-config on shipped config failed"
+for name in high_priority medium_priority low_priority best_effort; do
+    echo "$out" | grep -q "^$name " || fail "class table has no row for $name"
+done
+echo "$out" | grep -q '^high_priority  *30% *46 *30000000 *32k *1:10 *0$' \
+    || fail "high_priority row wrong: $out"
+
+# --config is the long form of -c.
+long=$(./bwopt check-config --config config/policies.conf) || fail "--config form failed"
+[ "$out" = "$long" ] || fail "--config output differs from -c output"
+
+# The default config path is config/policies.conf.
+dflt=$(./bwopt check-config) || fail "check-config without -c failed"
+[ "$out" = "$dflt" ] || fail "default config output differs from -c output"
+
+rc=0
+err=$(./bwopt check-config -c tests/fixtures/conf/bad_dscp.conf 2>&1 >/dev/null) || rc=$?
+[ "$rc" -eq 2 ] || fail "bad_dscp.conf exited $rc, expected 2"
+echo "$err" | grep -q 'bad_dscp.conf:8:' || fail "bad_dscp.conf error has no line number: $err"
+
+rc=0
+./bwopt check-config --config tests/fixtures/conf/dup_dscp.conf > /dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "dup_dscp.conf via --config exited $rc, expected 2"
+
+rc=0
+./bwopt check-config -c /nonexistent.conf > /dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "missing config exited $rc, expected 2"
+
 echo "test_cli: ok"
