@@ -65,10 +65,10 @@ memcheck: fixtures $(TEST_RUNNER) $(TARGET)
 	$(VALGRIND) ./$(TARGET) classify -r $(FIXTURE_DIR)/mixed.pcap > /dev/null
 
 install: $(TARGET)
-	install -d $(DESTDIR)$(PREFIX)/bin
-	install -m 0755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(TARGET)
-	install -d $(DESTDIR)/etc/bandwidth_optimizer
-	install -m 0644 config/policies.conf $(DESTDIR)/etc/bandwidth_optimizer/policies.conf
+	install -d $(DESTDIR)$(PREFIX)/sbin
+	install -m 0755 $(TARGET) $(DESTDIR)$(PREFIX)/sbin/$(TARGET)
+	install -d $(DESTDIR)/etc/bwopt
+	install -m 0644 config/policies.conf $(DESTDIR)/etc/bwopt/policies.conf
 
 clean:
 	rm -f $(SRCDIR)/*.o $(LIB) $(TARGET) $(TEST_RUNNER) $(GEN_PCAP)

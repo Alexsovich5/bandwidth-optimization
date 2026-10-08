@@ -11,6 +11,15 @@ services:
       - NET_ADMIN
     command: make test
 
+  demo:
+    image: bandwidth-optimization:dev
+    volumes:
+      - .:/src
+    working_dir: /src
+    cap_add:
+      - NET_ADMIN
+    command: bash scripts/demo.sh
+
 networks:
   default:
     ipam:
