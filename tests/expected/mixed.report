@@ -1,0 +1,6 @@
+iface      class            samples  packets      bytes   avg(bit/s)  peak(bit/s)
+eth0       best_effort            2        5        538         2152         4304
+eth0       high_priority          2        5        776         3104         6208
+eth0       low_priority           2        3        232          928         1144
+eth0       medium_priority        2        4        386         1544         3088
+eth0       unclassified           2        2        104          416          832

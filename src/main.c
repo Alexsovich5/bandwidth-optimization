@@ -16,8 +16,11 @@
 #include "config.h"
 #include "dscp.h"
 #include "exec.h"
+#include "monitor.h"
 #include "packet.h"
 #include "qos.h"
+#include "report.h"
+#include "store.h"
 #include "version.h"
 
 #define EXIT_RUNTIME 1
@@ -50,6 +53,9 @@ static void usage(FILE *out)
             "  apply                  install the HTB tree and DSCP rules on the interface,\n"
             "                         replacing any previous policy\n"
             "  clear                  remove the HTB tree and DSCP rules from the interface\n"
+            "  monitor -r FILE        replay a pcap file, counting traffic per class and\n"
+            "                         storing bits per second for every interval in SQLite\n"
+            "  report --db PATH       print per-class totals and average/peak bit/s\n"
             "\n"
             "Options:\n"
             "  -c, --config FILE      policy file (default config/policies.conf)\n"
@@ -58,6 +64,10 @@ static void usage(FILE *out)
             "  -w, --write FILE       pcap file to write\n"
             "  --summary              print packets and bytes per class instead\n"
             "  --dry-run              print the commands apply/clear would run\n"
+            "  --db PATH              SQLite database (default: database= in the policy)\n"
+            "  --interval S           seconds per sample (default: update_interval=)\n"
+            "  --since UNIX_TS        report: only samples with ts >= UNIX_TS\n"
+            "  --iface IFACE          report: only samples of this interface\n"
             "  --version              print the version and exit\n"
             "  --help                 print this help and exit\n");
 }
@@ -437,6 +447,189 @@ static int cmd_apply_clear(const char *config_file, const char *iface, int apply
     return rc;
 }
 
+struct monitor_state {
+    const struct bw_config *cfg;
+    struct bw_capture *cap;
+    sqlite3 *db;
+    const char *db_path;
+    const char *iface;
+    unsigned interval;
+    struct bw_monitor mon;
+    int started;
+    time_t next;               /* end of the current interval */
+    struct timeval last_ts;    /* timestamp of the latest packet */
+    unsigned long packets, flushes;
+    int failed;
+};
+
+/* Writes the counters as samples ending at now; stops the loop on error. */
+static void monitor_flush(struct monitor_state *st, time_t now)
+{
+    struct bw_sample samples[BW_MONITOR_MAX_SAMPLES];
+    int n = bw_monitor_flush(&st->mon, now, samples);
+
+    if (bw_store_put(st->db, st->iface, st->cfg, samples, n) != SQLITE_OK) {
+        fprintf(stderr, "bwopt: %s: %s\n", st->db_path, sqlite3_errmsg(st->db));
+        st->failed = 1;
+        bw_capture_break(st->cap);
+        return;
+    }
+    st->flushes++;
+}
+
+/*
+ * Intervals follow packet timestamps: the first packet starts the first
+ * interval, and every interval boundary that a packet passes is flushed
+ * before the packet is counted (idle intervals give rows of zeros).
+ */
+static void monitor_frame(u_char *user, int dlt, const struct pcap_pkthdr *hdr,
+                          const u_char *bytes)
+{
+    struct monitor_state *st = (struct monitor_state *)user;
+    struct bw_packet pkt;
+    time_t ts = hdr->ts.tv_sec;
+    int idx = -1;
+
+    if (st->failed)
+        return;
+    if (!st->started) {
+        bw_monitor_init(&st->mon, st->cfg->nclasses, ts);
+        st->next = ts + (time_t)st->interval;
+        st->started = 1;
+    }
+    while (ts >= st->next) {
+        monitor_flush(st, st->next);
+        if (st->failed)
+            return;
+        st->next += (time_t)st->interval;
+    }
+    if (bw_packet_decode(dlt, bytes, hdr->caplen, hdr->len, &pkt) == 0)
+        idx = bw_classify(st->cfg, &pkt);
+    bw_monitor_add(&st->mon, idx, hdr->len);
+    st->last_ts = hdr->ts;
+    st->packets++;
+}
+
+/*
+ * The final, partial interval ends at the latest packet's timestamp
+ * rounded up to a whole second, and at least one second after it began.
+ */
+static void monitor_final_flush(struct monitor_state *st)
+{
+    time_t end = st->last_ts.tv_sec + (st->last_ts.tv_usec > 0 ? 1 : 0);
+
+    if (end <= st->mon.last)
+        end = st->mon.last + 1;
+    monitor_flush(st, end);
+}
+
+static int parse_seconds(const char *s, unsigned long max, unsigned long *out)
+{
+    char *end;
+    unsigned long v;
+
+    if (*s < '0' || *s > '9')
+        return -1;
+    v = strtoul(s, &end, 10);
+    if (*end != '\0' || v > max)
+        return -1;
+    *out = v;
+    return 0;
+}
+
+static int cmd_monitor(const char *config_file, const char *pcap_file, const char *db_path,
+                       unsigned interval)
+{
+    struct bw_config cfg;
+    struct bw_capture cap;
+    struct monitor_state st;
+    char err[PCAP_ERRBUF_SIZE + 64];
+    int rc = 0;
+
+    if (pcap_file == NULL) {
+        fprintf(stderr, "bwopt: monitor needs -r FILE\n");
+        usage(stderr);
+        return EXIT_USAGE;
+    }
+    if (load_config(config_file, &cfg) != 0)
+        return EXIT_USAGE;
+    if (db_path == NULL)
+        db_path = cfg.database;
+    if (interval == 0)
+        interval = cfg.update_interval;
+
+    if (bw_capture_open_offline(&cap, pcap_file, err, sizeof err) != 0) {
+        fprintf(stderr, "bwopt: %s\n", err);
+        return EXIT_RUNTIME;
+    }
+    memset(&st, 0, sizeof st);
+    if (bw_store_open(db_path, &st.db) != SQLITE_OK) {
+        fprintf(stderr, "bwopt: %s: %s\n", db_path,
+                st.db ? sqlite3_errmsg(st.db) : "out of memory");
+        bw_store_close(st.db);
+        bw_capture_close(&cap);
+        return EXIT_RUNTIME;
+    }
+    st.cfg = &cfg;
+    st.cap = &cap;
+    st.db_path = db_path;
+    st.iface = cfg.iface;
+    st.interval = interval;
+
+    if (bw_capture_loop(&cap, -1, monitor_frame, (u_char *)&st) < 0) {
+        fprintf(stderr, "bwopt: %s: %s\n", pcap_file, bw_capture_error(&cap));
+        rc = EXIT_RUNTIME;
+    } else if (!st.failed && st.started) {
+        monitor_final_flush(&st);
+    }
+    if (st.failed)
+        rc = EXIT_RUNTIME;
+    bw_store_close(st.db);
+    bw_capture_close(&cap);
+
+    if (rc == 0)
+        printf("monitor: %lu packets from %s, %lu intervals of %us written to %s\n",
+               st.packets, pcap_file, st.flushes, interval, db_path);
+    return rc;
+}
+
+static int cmd_report(const char *db_path, const char *iface, time_t since)
+{
+    sqlite3 *db = NULL;
+    struct bw_store_stat *rows = NULL;
+    int n, rc = 0;
+
+    if (db_path == NULL) {
+        fprintf(stderr, "bwopt: report needs --db PATH\n");
+        usage(stderr);
+        return EXIT_USAGE;
+    }
+    /* read-only: a mistyped path is an error, not a new empty database */
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        fprintf(stderr, "bwopt: %s: %s\n", db_path, db ? sqlite3_errmsg(db) : "out of memory");
+        sqlite3_close(db);
+        return EXIT_RUNTIME;
+    }
+    n = bw_store_query(db, iface, since, 0, NULL, 0);
+    if (n > 0 && (rows = calloc((size_t)n, sizeof *rows)) == NULL) {
+        fprintf(stderr, "bwopt: out of memory\n");
+        sqlite3_close(db);
+        return EXIT_RUNTIME;
+    }
+    if (n > 0)
+        n = bw_store_query(db, iface, since, 0, rows, n);
+    if (n < 0) {
+        fprintf(stderr, "bwopt: %s: %s\n", db_path, sqlite3_errmsg(db));
+        rc = EXIT_RUNTIME;
+    } else if (bw_report_print(rows, n, stdout) != 0 || fflush(stdout) != 0) {
+        fprintf(stderr, "bwopt: write error\n");
+        rc = EXIT_RUNTIME;
+    }
+    free(rows);
+    sqlite3_close(db);
+    return rc;
+}
+
 int main(int argc, char *argv[])
 {
     const char *interface = NULL;   /* NULL: interface= from the policy */
@@ -444,6 +637,9 @@ int main(int argc, char *argv[])
     const char *command = NULL;
     const char *read_file = NULL;
     const char *write_file = NULL;
+    const char *db_path = NULL;     /* NULL: database= from the policy */
+    unsigned long interval = 0;     /* 0: update_interval= from the policy */
+    unsigned long since = 0;
     int summary = 0;
     int dry_run = 0;
     int i;
@@ -467,6 +663,20 @@ int main(int argc, char *argv[])
         } else if ((strcmp(argv[i], "--write") == 0 || strcmp(argv[i], "-w") == 0)
                    && i + 1 < argc) {
             write_file = argv[++i];
+        } else if (strcmp(argv[i], "--iface") == 0 && i + 1 < argc) {
+            interface = argv[++i];
+        } else if (strcmp(argv[i], "--db") == 0 && i + 1 < argc) {
+            db_path = argv[++i];
+        } else if (strcmp(argv[i], "--interval") == 0 && i + 1 < argc) {
+            if (parse_seconds(argv[++i], 86400, &interval) != 0 || interval == 0) {
+                fprintf(stderr, "bwopt: --interval '%s' must be 1-86400 seconds\n", argv[i]);
+                return EXIT_USAGE;
+            }
+        } else if (strcmp(argv[i], "--since") == 0 && i + 1 < argc) {
+            if (parse_seconds(argv[++i], 0x7fffffffUL, &since) != 0) {
+                fprintf(stderr, "bwopt: --since '%s' must be a unix timestamp\n", argv[i]);
+                return EXIT_USAGE;
+            }
         } else if (strcmp(argv[i], "--summary") == 0) {
             summary = 1;
         } else if (strcmp(argv[i], "--dry-run") == 0) {
@@ -502,6 +712,10 @@ int main(int argc, char *argv[])
         return cmd_apply_clear(config_file, interface, 1, dry_run);
     if (strcmp(command, "clear") == 0)
         return cmd_apply_clear(config_file, interface, 0, dry_run);
+    if (strcmp(command, "monitor") == 0)
+        return cmd_monitor(config_file, read_file, db_path, (unsigned)interval);
+    if (strcmp(command, "report") == 0)
+        return cmd_report(db_path, interface, (time_t)since);
 
     fprintf(stderr, "bwopt: unknown command '%s'\n", command);
     usage(stderr);

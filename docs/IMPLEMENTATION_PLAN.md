@@ -392,7 +392,9 @@ Common conventions:
   - `--db` overrides `database`; a path that cannot be opened exits 1 with the error
   - `bwopt report --db PATH [--since] [--iface]` prints a per-class table
 - **Files**:
-  - modify `src/main.c` (subcommands) and `src/capture.c` (packet timestamps to the callback)
+  - modify `src/main.c` (subcommands). `src/capture.c` needs no change: the callback already
+    receives the `pcap_pkthdr` with the packet timestamp. Offline rows are stored under the
+    policy's `interface=`.
   - create `src/report.c`, `src/report.h`, `tests/test_report.c`,
     `tests/integration/test_monitor.sh`, `tests/expected/mixed.report`
 - **Tests first**:
